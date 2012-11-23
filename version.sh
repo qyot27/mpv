@@ -48,6 +48,9 @@ git_revision_head="$(git rev-parse --short HEAD)"
 git_hashes="master-$git_revision_master HEAD-$git_revision_head"
 branches_included="contains: $(git branch --merged | grep -v master | sed 's/^..//g' | tr '\n' ' ')"
 version="$git_revision ($git_hashes)\n$branches_included"
+seq_revision_master=`git rev-list --count master`
+seq_revision_diff=`git rev-list --no-merges --count HEAD ^master`
+seq_revision=$seq_revision_master+$seq_revision_diff
 
 # other tarballs extract the version number from the VERSION file
 if test ! "$version"; then
@@ -56,10 +59,11 @@ fi
 
 test "$version" || version=UNKNOWN
 
+REV_COUNT="#define REV_COUNT \"${seq_revision}\ \""
 VERSION="${version}${extra}"
 
 if test "$print" = yes ; then
-    echo "$VERSION"
+    echo "r$seq_revision $VERSION"
     exit 0
 fi
 
@@ -94,6 +98,7 @@ MPVCOPYRIGHT="#define MPVCOPYRIGHT \"Copyright © 2000-2022 mpv/MPlayer/mplayer2
 if test "$NEW_REVISION" != "$OLD_REVISION"; then
     cat <<EOF > "$version_h"
 $NEW_REVISION
+$REV_COUNT
 $BUILDDATE
 $GITDATE
 $MPVCOPYRIGHT
