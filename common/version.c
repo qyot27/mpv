@@ -30,7 +30,7 @@
 #define GITDATE_FULL "\n last updated on " GITDATE
 #endif
 
-const char mpv_version[]  = "mpv " VERSION;
+const char mpv_version[]  = "mpv r" REV_COUNT VERSION;
 const char mpv_builddate[] = BUILDDATE_FULL;
 const char mpv_gitdate[] = GITDATE_FULL;
 const char mpv_copyright[] = MPVCOPYRIGHT;
