@@ -1,0 +1,4979 @@
+
+///////////////
+/// Preface
+///////////////
+
+# mpv can be cross-compiled for either 32-bit or 64-bit Windows from a Linux
+# host by using MinGW-w64.  MinGW-w64 is available from
+# http://mingw-w64.sourceforge.net.
+
+//////////////////////////////////////
+/// Advanced (manual) instructions
+//////////////////////////////////////
+
+# This guide was written under Ubuntu (starting with 12.10), but realistically,
+# any Debian-based system should work as far as the apt commands go, and/or any
+# arbitrary Linux distribution could probably be used on the pure compilation
+# stuffs.
+
+# This guide assumes that you're running a 64-bit version of Ubuntu, and that
+# the installed cross environment is multilib-enabled.
+
+# Make sure you have a list of other necessary build system and source download
+# components.
+
+    sudo apt-get install build-essential gcc-multilib g++-multilib checkinstall \
+    nasm yasm cvs git gperf subversion mercurial automake* autoconf* libtool* m4 \
+    bison flex p7zip-full lzip texinfo help2man tofrodos texi2html docutils-common \
+    cmake pkgconf bzr autopoint meson ninja-build gettext binfmt-support ruby \
+    doxygen gtk-doc-tools zlib1g-dev python-is-python3 python3-distutils
+
+# Any time \ is at the end of a line, it means the command spans multiple lines.
+# Make sure to copy the entire command.  To make this easier to see, such
+# commands have been indented.
+
+# Wine is helpful for testing binaries while still under Ubuntu, and for more
+# rigorously making the compilation process assume it's being run on Windows.
+# The preferred way to handle this is by installing from the official PPA.
+
+sudo dpkg --add-architecture i386 && \
+wget -nc https://download.opensuse.org/repositories/Emulators:/Wine:/Debian/xUbuntu_19.10/Release.key -O - | sudo apt-key add - && \
+sudo apt-add-repository 'deb https://download.opensuse.org/repositories/Emulators:/Wine:/Debian/xUbuntu_19.10 ./' && \
+sudo apt-get update && \
+sudo apt-get install --install-recommends winehq-devel wine-binfmt && \
+sudo update-binfmts --import wine
+
+# Starting with Ubuntu 20.04 LTS, this guide will recommend the Wine package
+# provided by the upstream Ubuntu repositories.  In which case, just the
+# following is needed:
+
+sudo apt-get install --install-recommends wine wine-binfmt && \
+sudo update-binfmts --import wine
+
+# You'll notice that there are certain cpu optimization flags used by the
+# majority of steps in this guide (core2 for 64-bit, or pentium3 for 32-bit).
+# These are simply due to what I feel are respectable baselines for each, so
+# feel free to either omit them, or to use ones that match your setup. For the
+# list of CPU types and SIMD flags, consult GCC's CPU optimization info at:
+# http://gcc.gnu.org/onlinedocs/gcc/x86-Options.html
+
+
+
+//////////////////////////////////
+/// MinGW-w64/GCC installation
+//////////////////////////////////
+
+# The first step to cross-compiling is to actually have a cross-compilation
+# environment.  Earlier versions of this guide used Zeranoe's build script as
+# the method to generate this initial toolchain, but in the interest of
+# flexibility I've opted to go with manually building these components as well.
+# The instructions are based on what Zeranoe's build script used to do, as we're
+# assuming the user will install this toolchain to the system as a replacement
+# or alternative to the repository version.
+
+# Any of the make steps can be executed in parallel by specifying the
+# --jobs/-j parameter with the number of cores your CPU has.  This guide
+# makes this automatic by using -j$(nproc), which will detect the number
+# of cores and use a corresponding number of jobs.  This is only relevant
+# for make, since ninja uses all cores by default.
+
+# First, we need a staging area, so that all the packages don't clutter up your
+# home directory:
+
+mkdir mingw-packages
+
+# Additionally, all of these will be getting installed to non-system areas
+# initially, since most of them actually don't get installed and are only needed
+# during the build process, and the others need to be in a correct directory
+# hierarchy before being installed.
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++
++ Building multilib cross-compilation environment
++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Dependency: Binutils
+====================
+
+# Future hint: to avoid a 'too many open file descriptors' error when linking
+# FFmpeg, LTO must be disabled when building GCC.
+
+cd ~/mingw-packages && \
+wget https://ftp.gnu.org/gnu/binutils/binutils-2.35.1.tar.xz -O - | tar -xJvf - && \
+cd binutils-2.35.1 && \
+    CPPFLAGS="-march=core2" ./configure --prefix=$HOME/mingw-build/mingw-w64-x86_64 \
+    --disable-shared --enable-static --disable-nls --enable-multilib \
+    --enable-targets=x86_64-w64-mingw32,i686-w64-mingw32 \
+    --target=x86_64-w64-mingw32 --with-sysroot=$HOME/mingw-build/mingw-w64-x86_64 \
+    --datarootdir=$HOME/mingw-build/mingw-w64-x86_64/share/gdb-mingw && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: MinGW-w64 headers
+=============================
+
+# Setting --enable-secure-api disables support for Windows XP throughout the cross
+# environment. This guide won't explicitly support XP in the build steps anymore,
+# but those places where XP support can be regained with a configuration option
+# will be noted.
+
+cd ~/mingw-packages && \
+wget https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v8.0.0.tar.bz2 -O - | tar -xjvf - && \
+cd mingw-w64-v8.0.0/mingw-w64-headers && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --enable-sdk=all --enable-secure-api --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+make install && \
+
+cd $HOME/mingw-build/mingw-w64-x86_64 && \
+ln -s x86_64-w64-mingw32 mingw
+
+
+Dependency: GMP
+===============
+
+cd ~/mingw-packages && \
+wget https://gmplib.org/download/gmp/gmp-6.2.0.tar.xz -O - | tar -xJvf - && \
+cd gmp-6.2.0 && \
+    CPPFLAGS="-march=core2 -fexceptions" \
+    ./configure --prefix=$HOME/mingw-packages/gmp-6.2.0-x86_64 --enable-fat \
+    --disable-shared --enable-static --enable-cxx --enable-silent-rules && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: MPFR
+================
+
+cd ~/mingw-packages && \
+wget http://www.mpfr.org/mpfr-current/mpfr-4.1.0.tar.xz -O - | tar -xJvf - && \
+cd mpfr-4.1.0 && \
+#wget http://www.mpfr.org/mpfr-4.1.0/allpatches && \
+#patch -N -Z -p1 < allpatches && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=$HOME/mingw-packages/mpfr-4.1.0-x86_64 --disable-shared \
+    --enable-static --with-gmp=$HOME/mingw-packages/gmp-6.2.0-x86_64 \
+    --enable-silent-rules && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: MPC
+===============
+
+cd ~/mingw-packages && \
+wget https://ftp.gnu.org/gnu/mpc/mpc-1.2.1.tar.gz -O - | tar -xzvf - && \
+cd mpc-1.2.1 && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=$HOME/mingw-packages/mpc-1.2.1-x86_64 --disable-shared \
+    --enable-static --with-gmp=$HOME/mingw-packages/gmp-6.2.0-x86_64 \
+    --with-mpfr=$HOME/mingw-packages/mpfr-4.1.0-x86_64 --enable-silent-rules && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: ISL
+===============
+
+cd ~/mingw-packages && \
+wget http://isl.gforge.inria.fr/isl-0.22.1.tar.xz -O - | tar -xJvf - && \
+cd isl-0.22.1 && \
+    ./configure --prefix=$HOME/mingw-packages/isl-0.22.1-x86_64 --enable-static \
+    --with-gmp-prefix=$HOME/mingw-packages/gmp-6.2.0-x86_64 \
+    --disable-shared --with-clang=no && \
+make -j$(nproc) && \
+make install
+
+
+GNU Compiler Collection (GCC)
+=============================
+
+cd ~/mingw-packages && \
+wget ftp://ftp.gnu.org/gnu/gcc/gcc-10.2.0/gcc-10.2.0.tar.xz -O - | tar -xJvf - && \
+
+# GCC requires an out-of-tree build, so we create another staging area
+# specifically for GCC.
+
+mkdir gcc-build && \
+cd gcc-build && \
+
+# Now, the main build process.
+
+    CPPFLAGS="-march=core2" ../gcc-10.2.0/configure \
+    --prefix=$HOME/mingw-build/mingw-w64-x86_64 --disable-shared \
+    --enable-static --disable-nls --enable-multilib \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-x86_64 \
+    --with-mpc=$HOME/mingw-packages/mpc-1.2.1-x86_64 \
+    --with-mpfr=$HOME/mingw-packages/mpfr-4.1.0-x86_64 \
+    --with-gmp=$HOME/mingw-packages/gmp-6.2.0-x86_64 \
+    --with-isl=$HOME/mingw-packages/isl-0.22.1-x86_64 \
+    --with-host-libstdcxx=-lstdc++ --enable-languages=c,c++ \
+    --enable-threads=posix --enable-fully-dynamic-string \
+    --build=x86_64-pc-linux-gnu --target=x86_64-w64-mingw32 \
+    --enable-targets=all --disable-lto --enable-mingw-wildcard \
+    --with-system-zlib && \
+make -j$(nproc) all-gcc && \
+make install-gcc
+
+# --with-system-zlib is necessary because the in-tree zlib
+# doesn't seem to want to build with multilib enabled (and we'll
+# be building our own zlib for MinGW later anyway).
+
+
+MinGW-w64 Runtime
+=================
+
+cd ~/mingw-packages/mingw-w64-v8.0.0/mingw-w64-crt && \
+export PATH=$PATH:$HOME/mingw-build/mingw-w64-x86_64/bin && \
+    CPPFLAGS="-march=core2 -D_FORTIFY_SOURCE=0" ./configure \
+    --prefix=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --enable-lib32 --enable-wildcard --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+make install && \
+
+
+Winpthreads
++++++++++++
+
+# Enabling threads=posix in GCC requires building MinGW's winpthreads library
+
+cd ~/mingw-packages/mingw-w64-v8.0.0/mingw-w64-libraries/winpthreads && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+make install && \
+
+# The 32-bit version of winpthreads has to be built separately.
+
+make distclean && \
+cd ~/mingw-packages/mingw-w64-v8.0.0/mingw-w64-libraries/winpthreads && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    RCFLAGS="-F pe-i386" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --libdir=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32/lib32 \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+make install
+
+
+LibGCC
+======
+
+cd ~/mingw-packages/gcc-build && \
+make -j$(nproc) all-target-libgcc && \
+make install-target-libgcc && \
+make -j$(nproc) && \
+make install-strip
+
+
+libmangle
+=========
+
+# requires libgcc and Wine
+
+cd ~/mingw-packages/mingw-w64-v8.0.0/mingw-w64-libraries/libmangle && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+make install && \
+
+make distclean && \
+cd ~/mingw-packages/mingw-w64-v8.0.0/mingw-w64-libraries/libmangle && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    RCFLAGS="-F pe-i386" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --libdir=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32/lib32 \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-x86_64/x86_64-w64-mingw32 \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+make install
+
+
+Gendef
+======
+
+cd ~/mingw-packages/mingw-w64-v8.0.0/mingw-w64-tools/gendef && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-x86_64 \
+    --build=x86_64-pc-linux-gnu && \
+make -j$(nproc) && \
+make install && \
+
+cd ~/mingw-build/mingw-w64-x86_64 && \
+rm mingw && \
+cp bin/gendef bin/x86_64-w64-mingw32-gendef
+
+
+Cleaning up
+===========
+
+# This is as simple as deleting the staging area.
+
+cd ~/ && \
+sudo rm -R mingw-packages
+
+
+Packaging Preparation
+=====================
+
+# Copy YASM and pkg-config into the bin directory of the toolchain so that they
+# can easily be found when a prefixed copy of these tools are needed.
+
+cd mingw-build/mingw-w64-x86_64 && \
+sudo cp /usr/bin/nasm bin/x86_64-w64-mingw32-nasm && \
+sudo cp /usr/bin/yasm bin/x86_64-w64-mingw32-yasm && \
+sudo cp /usr/bin/pkg-config bin/x86_64-w64-mingw32-pkg-config && \
+
+# A few of these pieces require using CMake to build them. This is not as
+# straight-forward as using autotools to cross-compile, and requires some setup:
+
+cd x86_64-w64-mingw32 && \
+wget http://cpansearch.perl.org/src/TOKUHIROM/mRuby-0.06/vendor/mruby/cmake/Toolchain-Ubuntu-mingw32.cmake.sample -O toolchain-x86_64-w64-mingw32.cmake && \
+sed -i -e 's/ ~\/crossdev\/w32//g' -e 's/i686/x86_64/g' toolchain-x86_64-w64-mingw32.cmake
+
+# Setting up meson's cross-files:
+
+cd ../ && \
+mkdir -p share/meson/cross/ && \
+wget "https://raw.githubusercontent.com/mesonbuild/meson/master/cross/linux-mingw-w64-32bit.txt" -O share/meson/cross/i686-w64-mingw32 && \
+wget "https://raw.githubusercontent.com/mesonbuild/meson/master/cross/linux-mingw-w64-64bit.txt" -O share/meson/cross/x86_64-w64-mingw32-multilib32 && \
+wget "https://raw.githubusercontent.com/mesonbuild/meson/master/cross/linux-mingw-w64-64bit.txt" -O share/meson/cross/x86_64-w64-mingw32 && \
+
+['/usr/bin/x86_64-w64-mingw32-windres', '-F', 'pe-i386'] is correct usage for rcflags
+
+    sed -i -e 's/mingw32-windres/mingw32-windres -F pe-i386/' \
+    -e "11ic_args = ['-m32']\ncxx_args = ['-m32']\nc_link_args = ['-m32', '-L/usr/i686-w64-mingw32/lib']" \
+    -e "s/'x86_64'/'x86'/g" share/meson/cross/x86_64-w64-mingw32-multilib32
+
+
+# Create i686-w64-mingw32 root and symlink lib32 into it.
+
+mkdir -p i686-w64-mingw32/lib && \
+cd i686-w64-mingw32/lib && \
+ln -s ../../x86_64-w64-mingw32/lib32/* .
+
+
+++++++++++++++++++++++++++++
++ Installing the toolchain
+++++++++++++++++++++++++++++
+
+cd ~/mingw-build/mingw-w64-x86_64 && \
+    sudo checkinstall --pkgname=mingw-w64-gcc \
+    --pkgversion="1:$(bin/x86_64-w64-mingw32-gcc --version | head -1 | \
+    cut -f3 -d ' ')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --stripso=yes --addso=yes --fstrans=no --default cp -R * /usr && \
+mv *.deb ~/
+
+
++++++++++++++++
++ Final notes
++++++++++++++++
+
+# Many commands have, after running make, an 'rm <filename>.spec' command.
+# These .spec files are intended for - from what I can tell - RPM distributions,
+# maybe sometimes DEB, and they provide the package information to be used as
+# metadata in the package. checkinstall has severe problems with this, as it
+# will try to automatically use the .spec file rather than the user-provided
+# metadata that gets passed to it normally. The end result is that - in the best
+# case - the resulting package gets the wrong metadata attached to it (and has
+# no -mingw identifying label).  At worst, the metadata is extremely malformatted,
+# and may even cause packaging errors.
+
+# So if a set of instructions has one of these spec-removal commands, ALWAYS
+# remember to run it.
+
+
+# The '&& \' at the end of each instruction is to allow running the
+# entire piece at once.  This is for convenience, and should just work.
+# If there are errors, run each instruction one at a time and adjust
+# accordingly.
+
+
+# Finally, we'll be keeping most of the source directories for the dependencies
+# in a subdirectory so that it doesn't clog your $HOME with a bunch of stuff
+# that only needs to be built occasionally.  The *.deb files that checkinstall
+# spits out will also be moved to their own directory for archival purposes.
+
+mkdir -p ~/mpv-build-deps ~/mingw_debs/i686 ~/mingw_debs/amd64
+
+
+
+
+//////////////////////////
+/// Basic dependencies
+//////////////////////////
+
+# These are dependencies that are best installed first, so that multiple other
+# components can use them.
+
+
+Dependency: zlib
+================
+
+cd ~/mpv-build-deps && \
+wget http://zlib.net/zlib-1.2.11.tar.gz -O - | tar -xzvf - && \
+cd zlib-1.2.11 && \
+mkdir -p zlib-build/i686 zlib-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd zlib-build/i686 && \
+    CFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    CC=x86_64-w64-mingw32-gcc AR=x86_64-w64-mingw32-ar \
+    RANLIB=x86_64-w64-mingw32-ranlib \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --static && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=zlib-mingw-i686 --pkgversion="$(grep Version zlib.pc | \
+    sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CFLAGS="-march=core2" \
+    CC=x86_64-w64-mingw32-gcc AR=x86_64-w64-mingw32-ar \
+    RANLIB=x86_64-w64-mingw32-ranlib \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --static && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=zlib-mingw-amd64 --pkgversion="$(grep Version zlib.pc | \
+    sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: bzip2
+=================
+
+cd ~/mpv-build-deps && \
+wget http://ftp.suse.com/pub/people/sbrabec/bzip2/tarballs/bzip2-1.0.6.0.2.tar.gz -O - | tar -xzvf - && \
+cd bzip2-1.0.6.0.2 && \
+mkdir -p bzip2-build/i686 bzip2-build/amd64 && \
+sed -i '131 s/\\/\//g' bzip2.c && \
+
+
+32-bit
+++++++
+
+cd bzip2-build/i686 && \
+    CFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --enable-static \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=bzip2-mingw-i686 --pkgversion="$(grep Version \
+    bzip2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CFLAGS="-march=core2" ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --enable-static --disable-shared --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=bzip2-mingw-amd64 --pkgversion="$(grep Version \
+    bzip2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: xz-tools
+====================
+
+cd ~/mpv-build-deps && \
+wget http://tukaani.org/xz/xz-5.2.5.tar.gz -O - | tar -xzvf - && \
+cd xz-5.2.5 && \
+mkdir -p xz-build/i686 xz-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd xz-build/i686 && \
+    CFLAGS+="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS+="-m32" RC="x86_64-w64-mingw32-windres -F pe-i386" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --disable-nls --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=xz-tools-mingw-i686 --pkgversion="$(grep Version \
+    src/liblzma/liblzma.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --disable-nls --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=xz-tools-mingw-amd64 --pkgversion="$(grep Version \
+    src/liblzma/liblzma.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: lzo2
+================
+
+# optional dependency of libsnappy
+
+cd ~/mpv-build-deps && \
+wget http://www.oberhumer.com/opensource/lzo/download/lzo-2.10.tar.gz -O - | tar -xzvf - && \
+cd lzo-2.10 && \
+mkdir -p lzo-build/i686 lzo-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd lzo-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lzo-mingw-i686 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | cut -f2 -d "\"")-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lzo-mingw-amd64 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | cut -f2 -d "\"")-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: liblzf
+==================
+
+# optional dependency of libsnappy
+# copying lzf.h to the build dirs is necessary for out-of-tree
+# adding stdint.h and switching to uint64_t is necessary for 64-bit,
+# doesn't harm 32-bit build.
+
+cd ~/mpv-build-deps && \
+wget http://dist.schmorp.de/liblzf/liblzf-3.6.tar.gz -O - | tar -xzvf - && \
+cd liblzf-3.6 && \
+sed -i -e '12iEXEEXT = @EXEEXT@' -e 's/m 755 lzf/m 755 lzf$(EXEEXT)/g' Makefile.in && \
+sed -i -e '38i#include <stdint.h>' -e 's/unsigned _int64/uint64_t/g' lzf_c.c && \
+mkdir -p liblzf-build/i686 liblzf-build/amd64 && \
+cp lzf.h liblzf-build/i686 && \
+cp lzf.h liblzf-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd liblzf-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=liblzf-mingw-i686 --pkgversion="$(grep \
+    "VERSION = " Makefile | awk '{print $NF}')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=liblzf-mingw-amd64 --pkgversion="$(grep \
+    "VERSION = " Makefile | awk '{print $NF}')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libsnappy (32-bit)
+==============================
+
+# libsnappy is required by the Hap encoder
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/google/snappy.git && \
+cd snappy && \
+mkdir -p snappy-build/i686 snappy-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd snappy-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_EXE_LINKER_FLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    -DCMAKE_SYSROOT=/usr/i686-w64-mingw32 -DSNAPPY_BUILD_TESTS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=snappy-mingw-i686 --pkgversion="$(grep \
+    PACKAGE_VERSION SnappyConfigVersion.cmake  | grep "set(" | head -1 | \
+    cut -f2 -d "\"")-$(date --rfc-3339=date | sed 's/-//g')-git" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default \
+    ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DSNAPPY_BUILD_TESTS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=snappy-mingw-amd64 --pkgversion="$(grep \
+    PACKAGE_VERSION SnappyConfigVersion.cmake  | grep "set(" | head -1 | \
+    cut -f2 -d "\"")-$(date --rfc-3339=date | sed 's/-//g')-git" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default \
+    ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+
+////////////////////////////
+/// Image format support
+////////////////////////////
+
+
+Dependency: LCMS2 (basic)
+=========================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/mm2/Little-CMS.git && \
+cd Little-CMS && \
+mkdir -p littlecms-build/i686 littlecms-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd littlecms-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib -lz" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --without-jpeg --without-tiff --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lcms2-mingw-i686 --pkgversion="1:$(grep Version \
+    lcms2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --disable-shared --without-jpeg --without-tiff --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lcms2-mingw-amd64 --pkgversion="1:$(grep Version \
+    lcms2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: GIFLIB
+==================
+
+cd ~/mpv-build-deps && \
+wget http://downloads.sourceforge.net/project/giflib/giflib-5.2.1.tar.gz -O - | tar -xzvf - && \
+cd giflib-5.2.1 && \
+sed -i -e '64s/libgif.so //' -e '64s/libutil.so //' -e '65s/^/#/' -e '102,104s/^/#/'  Makefile && \
+mkdir -p giflib-build/i686 giflib-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd giflib-build/i686 && \
+ln -s ../../* . && \
+
+    make -j$(nproc) CC=x86_64-w64-mingw32-gcc CFLAGS="-m32 -march=pentium3 -msse \
+    -mtune=pentium3 -mfpmath=sse" LDFLAGS="-m32 -L/usr/i686-w64-mingw32" && \
+
+    sudo checkinstall --pkgname=giflib-mingw-i686 --pkgversion="$(./getversion | \
+    tr -d '[:space:]')-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default \
+    make install-include install-lib PREFIX=/usr/i686-w64-mingw32 && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+ln -s ../../* . && \
+make -j$(nproc) CC=x86_64-w64-mingw32-gcc CFLAGS="-march=core2" && \
+    sudo checkinstall --pkgname=giflib-mingw-amd64 --pkgversion="$(./getversion | \
+    tr -d '[:space:]')-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default \
+    make install-include install-lib PREFIX=/usr/x86_64-w64-mingw32 && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libjpeg-turbo
+=========================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/libjpeg-turbo/libjpeg-turbo && \
+cd libjpeg-turbo && \
+mkdir -p libjpegturbo-build/i686 libjpegturbo-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libjpegturbo-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DENABLE_SHARED:bool=off -DWITH_12BIT:bool=on -DCMAKE_SYSTEM_PROCESSOR="i686" && \
+ninja && \
+    sudo checkinstall --pkgname=libjpeg-turbo-mingw-i686 --pkgversion="$(grep \
+    Version pkgscripts/libturbojpeg.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DENABLE_SHARED:bool=off -DWITH_12BIT:bool=on \
+    -DCMAKE_SYSTEM_PROCESSOR="x86_64" && \
+ninja && \
+    sudo checkinstall --pkgname=libjpeg-turbo-mingw-amd64 --pkgversion="$(grep \
+    Version pkgscripts/libturbojpeg.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libpng
+==================
+
+cd ~/mpv-build-deps && \
+git clone git://git.code.sf.net/p/libpng/code libpng && \
+cd libpng && \
+git checkout libpng16 && \
+mkdir -p libpng-build/i686 libpng-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libpng-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DPNG_SHARED:bool=off -DPNG_TESTS:bool=off -DZLIB_INCLUDE_DIR=/usr/i686-w64-mingw32/include \
+    -DZLIB_LIBRARY=/usr/i686-w64-mingw32/lib/libz.a && \
+ninja && \
+    sudo checkinstall --pkgname=libpng-mingw-i686 --pkgversion="$(grep Version \
+    libpng.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DPNG_SHARED:bool=off -DPNG_TESTS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=libpng-mingw-amd64 --pkgversion="$(grep Version \
+    libpng.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: jbigkit
+===================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/qyot27/jbigkit.git && \
+cd jbigkit && \
+git checkout mingw-w64 && \
+autoreconf -fiv && \
+mkdir -p jbigkit-build/i686 jbigkit-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd jbigkit-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libjbig-mingw-i686 --pkgversion="$(grep \
+    JBG_VERSION ../../libjbig/jbig.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libjbig-mingw-amd64 --pkgversion="$(grep \
+    JBG_VERSION ../../libjbig/jbig.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libtiff
+===================
+
+# libtiff's CMakeLists.txt doesn't expect a multilib setup,
+# which will result in it trying to link to 64-bit builds of
+# the libraries. The only way to avoid this is to edit
+# CMakeCache.txt after configuring, and repoint it at the 32-bit
+# versions.
+
+# This problem also means it can't detect 32-bit LZMA, while it
+# can under 64-bit.
+
+# libtiff also doesn't add libjpeg, libjbig, and liblzma to
+# Libs.private when built static.
+
+# libtiffxx still has a 64-bit object in the i386 build.
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.com/libtiff/libtiff.git && \
+cd libtiff && \
+mkdir -p libtiff-build/i686 libtiff-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libtiff-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DBUILD_SHARED_LIBS:bool=off && \
+sed -i 's/\/usr\/x86_64-w64-mingw32/\/usr\/i686-w64-mingw32/g' CMakeCache.txt && \
+ninja && \
+sed -i 's/Libs.private:/Libs.private: -ljbig -ljpeg/' libtiff-4.pc && \
+    sudo checkinstall --pkgname=libtiff-mingw-i686 --pkgversion="$(grep Version \
+    libtiff-4.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DBUILD_SHARED_LIBS:bool=off && \
+ninja && \
+sed -i 's/Libs.private:/Libs.private: -ljbig -ljpeg -llzma/' libtiff-4.pc && \
+    sudo checkinstall --pkgname=libtiff-mingw-amd64 --pkgversion="$(grep Version \
+    libtiff-4.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libopenjpeg
+=======================
+
+cd ~/mpv-build-deps && \
+wget https://github.com/uclouvain/openjpeg/archive/v2.3.1.tar.gz -O - | tar -xzvf - && \
+cd openjpeg-2.3.1 && \
+mkdir -p openjpeg-build/i686 openjpeg-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd openjpeg-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DBUILD_SHARED_LIBS:bool=off -DBUILD_MJ2:bool=on -DBUILD_JPWL:bool=on \
+    -DBUILD_THIRDPARTY:bool=on -DBUILD_PKGCONFIG_FILES:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=libopenjpeg-mingw-i686 --pkgversion="$(grep \
+    Version libopenjp2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" \
+    -DBUILD_SHARED_LIBS:bool=off -DBUILD_MJ2:bool=on -DBUILD_JPWL:bool=on \
+    -DBUILD_THIRDPARTY:bool=on -DBUILD_PKGCONFIG_FILES:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=libopenjpeg-mingw-amd64 --pkgversion="$(grep \
+    Version libopenjp2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libwebp
+===================
+
+# --disable-tiff is necessary because of img2webp fails
+# to link libtiff if libtiff has jbig, jpeg, and lzma.
+# Forcing them into libtiff-4.pc's Libs.private doesn't
+# work, even when forcing pkg-config --static.  It may
+# be a propagation error in the examples/Makefile.
+
+cd ~/mpv-build-deps && \
+git clone https://chromium.googlesource.com/webm/libwebp && \
+cd libwebp && \
+autoreconf -fiv && \
+mkdir -p libwebp-build/i686 libwebp-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libwebp-build/i686 && \
+    LIBPNG_CONFIG="/usr/i686-w64-mingw32/bin/libpng16-config --static" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-swap-16bit-csp --disable-tiff --enable-libwebpmux \
+    --enable-libwebpdemux --enable-libwebpdecoder --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libwebp-mingw-i686 --pkgversion="$(grep Version \
+    src/libwebp.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    LIBPNG_CONFIG="/usr/x86_64-w64-mingw32/bin/libpng-config --static" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --enable-swap-16bit-csp --disable-tiff --enable-libwebpmux \
+    --enable-libwebpdemux --enable-libwebpdecoder --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libwebp-mingw-amd64 --pkgversion="$(grep Version \
+    src/libwebp.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: LCMS2 (full)
+========================
+
+cd ~/mpv-build-deps/Little-CMS && \
+git clean -xdf && \
+mkdir -p littlecms-build/i686 littlecms-build/amd64
+
+
+32-bit
+++++++
+
+cd littlecms-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib -llzma -ljbig -ljpeg" \
+    LIBS="-L/usr/i686-w64-mingw32/lib -llzma -ljbig -ljpeg" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --without-jpeg --without-tiff --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lcms2-mingw-i686 --pkgversion="1:$(grep Version \
+    lcms2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+# --without-jpeg needs to be used because the jpgicc util fails to build.
+# --without-tiff needs to be used because the tificc util fails to build.
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    LIBS="-L/usr/x86_64-w64-mingw32/lib -llzma -ljbig -ljpeg -ljbig" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --without-jpeg --without-tiff --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lcms2-mingw-amd64 --pkgversion="1:$(grep Version \
+    lcms2.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+# --without-jpeg needs to be used because the jpgicc util fails to build.
+# --without-tiff needs to be used because the tificc util fails to build.
+
+
+
+/////////////////////////////////////////////////////////////
+/// Subtitle rendering and On-Screen Display dependencies
+/////////////////////////////////////////////////////////////
+
+# These are meant to allow rendering subtitles.  Mostly it serves as the means
+# to get libass built, but some of them might be usable by other components, so
+# this occupies the second step in the process.
+
+
+Dependency: Iconv
+=================
+
+cd ~/mpv-build-deps && \
+wget http://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.16.tar.gz -O - | tar -xzvf - && \
+cd libiconv-1.16 && \
+mkdir -p iconv-build/i686 iconv-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd iconv-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    WINDRES="x86_64-w64-mingw32-windres -F pe-i386" \
+    RC="x86_64-w64-mingw32-windres -F pe-i386" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-silent-rules --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libiconv-mingw-i686 --pkgversion="$(grep \
+    "define VERSION" config.h | sed 's/"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --disable-shared --enable-silent-rules --build=x86_64-w64-mingw32 \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libiconv-mingw-amd64 --pkgversion="$(grep \
+    "define VERSION" config.h | sed 's/"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Enca
+================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/nijel/enca.git && \
+cd enca && \
+sed -i -e 's/encodings.dat make_hash/encodings.dat make_hash$(EXEEXT)/' -e 's/\.\/make_hash/\.\/make_hash$(EXEEXT)/' tools/Makefile.in && \
+mkdir -p enca-build/i686 enca-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd enca-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm enca.spec && \
+    sudo checkinstall --pkgname=enca-mingw-i686 --pkgversion="$(grep Version enca.pc | \
+    sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm enca.spec && \
+    sudo checkinstall --pkgname=enca-mingw-amd64 --pkgversion="$(grep Version enca.pc | \
+    sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Freetype2
+=====================
+
+cd ~/mpv-build-deps && \
+wget http://download.savannah.gnu.org/releases/freetype/freetype-2.10.4.tar.gz -O - | tar -xzvf - && \
+cd freetype-2.10.4 && \
+sed -i -e '494s/^/#/' -e '528s/^/#/' CMakeLists.txt && \
+mkdir -p freetype-build/i686 freetype-build/amd64 && \
+
+# Annoyingly, fontconfig's check for freetype2 checks for freetype's
+# libtool version in its PKG_CONFIG query, which freetype's CMake
+# system doesn't put in freetype2.pc (it uses the release number).
+
+
+32-bit
+++++++
+
+cd freetype-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    RC="x86_64-w64-mingw32-windres -F pe-i386" \
+    BZIP2_CFLAGS="-I/usr/i686-w64-mingw32/include" \
+    BZIP2_LIBS="-L/usr/i686-w64-mingw32/lib -lbz2" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/i686-w64-mingw32/lib \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=freetype2-mingw-i686 --pkgversion="$(grep -r \
+    PACKAGE_VERSION builds/unix/config.log | head -1 | cut -f2 -d "\"")-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" BZIP2_CFLAGS="-I/usr/x86_64-w64-mingw32/include" \
+    BZIP2_LIBS="-L/usr/x86_64-w64-mingw32/lib -lbz2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/x86_64-w64-mingw32/lib \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=freetype2-mingw-amd64 --pkgversion="$(grep -r \
+    PACKAGE_VERSION builds/unix/config.log | head -1 | cut -f2 -d "\"")-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+
+# Unfortunately, Freetype2 doesn't install its .pc file when using CMake unless
+# the Unix check ~line 455 is disabled or changed to include MINGW, which increases
+# the difficulty of fontconfig, libass, and FFmpeg detecting it.
+# This will be the recommended way in the future, whenever the pkg-config
+# issue is resolved.
+
+32-bit
+++++++
+
+cd freetype-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DZLIB_INCLUDE_DIR=/usr/i686-w64-mingw32/include \
+    -DZLIB_LIBRARY_RELEASE=/usr/i686-w64-mingw32/lib/libz.a \
+    -DPNG_LIBRARY_RELEASE=/usr/i686-w64-mingw32/lib/libpng.a \
+    -DPNG_PNG_INCLUDE_DIR=/usr/i686-w64-mingw32/include \
+    -DBZIP2_INCLUDE_DIRS=/usr/i686-w64-mingw32/include \
+    -DBZIP2_LIBRARY_RELEASE=/usr/i686-w64-mingw32/lib/libbz2.a \
+    -DCMAKE_RC_FLAGS="-F pe-i386" && \
+ninja && \
+    sudo checkinstall --pkgname=freetype2-mingw-i686 --pkgversion="$(grep \
+    PACKAGE_VERSION CPackConfig.cmake | head -1 | sed -e "s/}//g" | \
+    cut -f2 -d "\"")-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" && \
+ninja && \
+    sudo checkinstall --pkgname=freetype2-mingw-amd64 --pkgversion="$(grep \
+    PACKAGE_VERSION CPackConfig.cmake | head -1 | sed -e "s/}//g" | \
+    cut -f2 -d "\"")-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: c2man
+=================
+
+# c2man isn't a direct dependency of fribidi, but it is
+# necessary to avoid a build error. Thankfully, it only
+# needs to be built once, and it doesn't need to be
+# cross-compiled either.
+
+git clone git://github.com/fribidi/c2man.git && \
+cd c2man && \
+./Configure -d && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=c2man --pkgversion="$(grep Version \
+    CHANGES | tail -1 | sed -e 's/Version //' -e 's/://g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default
+
+
+Dependency: Fribidi
+===================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/fribidi/fribidi.git && \
+cd fribidi && \
+mkdir -p fribidi-build/i686 fribidi-build/amd64 && \
+
+32-bit
+++++++
+
+cd fribidi-build/i686 && \
+    meson ../.. --prefix=/usr/i686-w64-mingw32 --libdir=/usr/i686-w64-mingw32/lib \
+    --default-library static -Ddeprecated=false -Ddocs=false \
+    --cross-file x86_64-w64-mingw32-multilib32 && \
+ninja && \
+sed -i '$aCflags.private: -DFRIBIDI_LIB_STATIC' fribidi.pc && \
+    sudo checkinstall --pkgname=fribidi2-mingw-i686 --pkgversion="$(grep Version \
+    meson-private/fribidi.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    meson ../.. --prefix=/usr/x86_64-w64-mingw32 --libdir=/usr/x86_64-w64-mingw32/lib \
+    --default-library static -Ddeprecated=false -Ddocs=false \
+    --cross-file x86_64-w64-mingw32 && \
+ninja && \
+sed -i '$aCflags.private: -DFRIBIDI_LIB_STATIC' fribidi.pc && \
+    sudo checkinstall --pkgname=fribidi2-mingw-amd64 --pkgversion="$(grep Version \
+    meson-private/fribidi.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Harfbuzz
+====================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/harfbuzz/harfbuzz.git && \
+cd harfbuzz && \
+mkdir -p harfbuzz-build/i686 harfbuzz-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd harfbuzz-build/i686 && \
+    CPPFLAGS="-m32" meson ../.. --prefix=/usr/i686-w64-mingw32 --libdir=/usr/i686-w64-mingw32/lib \
+    --default-library static -Dtests=disabled -Dintrospection=disabled -Ddocs=disabled \
+    --cross-file x86_64-w64-mingw32-multilib32 && \
+ninja && \
+    sudo checkinstall --pkgname=libharfbuzz-mingw-i686 --pkgversion="$(grep Version \
+    meson-private/harfbuzz.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    meson ../.. --prefix=/usr/x86_64-w64-mingw32 --libdir=/usr/x86_64-w64-mingw32/lib \
+    --default-library static -Dtests=disabled -Dintrospection=disabled -Ddocs=disabled \
+    --cross-file x86_64-w64-mingw32 && \
+ninja && \
+    sudo checkinstall --pkgname=libharfbuzz-mingw-amd64 --pkgversion="$(grep Version \
+    meson-private/harfbuzz.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Expat
+=================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/libexpat/libexpat.git && \
+cd libexpat/expat && \
+mkdir -p libexpat-build/i686 libexpat-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libexpat-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DEXPAT_BUILD_TESTS:bool=off -DEXPAT_BUILD_EXAMPLES:bool=off -DEXPAT_BUILD_TOOLS:bool=off \
+    -DEXPAT_SHARED_LIBS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=libexpat-mingw-i686 --pkgversion="$(grep Version expat.pc | \
+    sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" \
+    -DEXPAT_BUILD_TESTS:bool=off -DEXPAT_BUILD_EXAMPLES:bool=off -DEXPAT_BUILD_TOOLS:bool=off \
+    -DEXPAT_SHARED_LIBS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=libexpat-mingw-amd64 --pkgversion="$(grep Version expat.pc | \
+    sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: json-c
+==================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/json-c/json-c.git && \
+cd json-c && \
+mkdir -p jsonc-build/i686 jsonc-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd jsonc-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DBUILD_SHARED_LIBS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=jsonc-mingw-i686 --pkgversion="$(grep Version \
+    json-c.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DBUILD_SHARED_LIBS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=jsonc-mingw-amd64 --pkgversion="$(grep Version \
+    json-c.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Fontconfig
+======================
+
+# Forcing configure to enable cross-compiling is not necessary to
+# actually build the library and programs, but having it disabled
+# causes checkinstall to fail, preventing fontconfig from being
+# installed properly.
+
+# To detect a CMake-built Freetype2, the version check must use
+# Freetype's internal version number, NOT the libtool version that
+# Fontconfig wants to use.  21.0.15 is eqivalent to Freetype 2.8.1.
+
+cd ~/mpv-build-deps && \
+git clone git://anongit.freedesktop.org/fontconfig && \
+cd fontconfig && \
+sed -i 's/21.0.15/2.8.1/' configure.ac && \
+autoreconf -fiv && \
+sed -i 's/cross_compiling=no/cross_compiling=yes/g' configure && \
+mkdir -p fontconfig-build/i686 fontconfig-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd fontconfig-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG="pkg-config --static" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/i686-w64-mingw32/lib ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --disable-shared --disable-docs \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm fontconfig.spec && \
+    sudo checkinstall --pkgname=fontconfig-mingw-i686 --pkgversion="$(grep Version \
+    fontconfig.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" PKG_CONFIG="pkg-config --static" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/x86_64-w64-mingw32/lib ../../configure \
+    --prefix=/usr/x86_64-w64-mingw32 --disable-shared --disable-docs \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm fontconfig.spec && \
+    sudo checkinstall --pkgname=fontconfig-mingw-amd64 --pkgversion="$(grep Version \
+    fontconfig.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: uchardet
+====================
+
+cd ~/mpv-build-deps && \
+git clone git://anongit.freedesktop.org/uchardet/uchardet && \
+cd uchardet && \
+sed -i '74s/^/#/' CMakeLists.txt && \
+mkdir -p uchardet-build/i686 uchardet-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd uchardet-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_PROCESSOR="i686" && \
+ninja && \
+    sudo checkinstall --pkgname=uchardet-mingw-i686 --pkgversion="$(grep Version \
+    uchardet.pc | cut -f2 -d ' ')-git-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-march=core2" -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_SYSTEM_PROCESSOR="x86_64" && \
+ninja && \
+    sudo checkinstall --pkgname=uchardet-mingw-amd64 --pkgversion="$(grep Version \
+    uchardet.pc | cut -f2 -d ' ')-git-$(date --rfc-3339=date | sed 's/-//g')" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: lua
+===============
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/LuaDist/lua.git && \
+cd lua && \
+git checkout lua-5.2 && \
+mkdir -p lua-build/i686 lua-build/amd64 && \
+LUAPACKVER=$(grep version dist.info | cut -f2 -d "\"") && \
+
+32-bit
+++++++
+
+cd lua-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="../luabuild/i686" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_RC_FLAGS="-F pe-i386" -DBUILD_SHARED_LIBS:bool=off && \
+ninja && \
+ninja install && \
+
+# Packaging
+
+cd ../luabuild/i686 && \
+mkdir -p lib/pkgconfig && \
+
+# Generate a .pc file so that mpv can use pkg-config to find lua.
+# The following 'echo' lines are a single command. I'd actually
+# have preferred using cat in order to reduce redundancy, but it
+# interprets the environment variables that should be left alone.
+
+    echo prefix=/usr/i686-w64-mingw32 > lib/pkgconfig/lua.pc && \
+    echo exec_prefix=\${prefix} >> lib/pkgconfig/lua.pc && \
+    echo libdir=\${exec_prefix}/lib >> lib/pkgconfig/lua.pc && \
+    echo includedir=\${prefix}/include >> lib/pkgconfig/lua.pc && \
+    echo >> lib/pkgconfig/lua.pc && \
+    echo Name: lua >> lib/pkgconfig/lua.pc && \
+    echo Description: Lua scripting language >> lib/pkgconfig/lua.pc && \
+    echo Version: $LUAPACKVER >> lib/pkgconfig/lua.pc && \
+    echo Libs: -L\${libdir} -llua >> lib/pkgconfig/lua.pc && \
+    echo Cflags: -I\${includedir} >> lib/pkgconfig/lua.pc
+
+# Install lua
+
+    sudo checkinstall --pkgname=lua-mingw-i686 --pkgversion="$(grep \
+    Version lib/pkgconfig/lua.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default cp -R * /usr/i686-w64-mingw32 && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="../luabuild/amd64" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" \
+    -DBUILD_SHARED_LIBS:bool=off && \
+ninja && \
+ninja install && \
+
+# Packaging
+
+cd ../luabuild/amd64 && \
+mkdir -p lib/pkgconfig && \
+
+# Generate a .pc file so that mpv can use pkg-config to find lua.
+# The following 'echo' lines are a single command. I'd actually
+# have preferred using cat in order to reduce redundancy, but it
+# interprets the environment variables that should be left alone.
+
+    echo prefix=/usr/x86_64-w64-mingw32 > lib/pkgconfig/lua.pc && \
+    echo exec_prefix=\${prefix} >> lib/pkgconfig/lua.pc && \
+    echo libdir=\${exec_prefix}/lib >> lib/pkgconfig/lua.pc && \
+    echo includedir=\${prefix}/include >> lib/pkgconfig/lua.pc && \
+    echo >> lib/pkgconfig/lua.pc && \
+    echo Name: lua >> lib/pkgconfig/lua.pc && \
+    echo Description: Lua scripting language >> lib/pkgconfig/lua.pc && \
+    echo Version: $LUAPACKVER >> lib/pkgconfig/lua.pc && \
+    echo Libs: -L\${libdir} -llua >> lib/pkgconfig/lua.pc && \
+    echo Cflags: -I\${includedir} >> lib/pkgconfig/lua.pc
+
+# Install lua
+
+    sudo checkinstall --pkgname=lua-mingw-amd64 --pkgversion="$(grep \
+    Version lib/pkgconfig/lua.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default cp -R * /usr/x86_64-w64-mingw32 && \
+mv *.deb ~/mingw_debs/amd64
+
+
+
+////////////////////////////////
+/// Disc access dependencies
+////////////////////////////////
+
+# These optional dependencies are needed for DVD and Blu-ray playback.
+
+# Circumvention of the DRM on DVD and Blu-ray is legally grey territory.  Users
+# should be aware of their region's provisions on this before making a decision
+# on whether to follow or skip this section.
+
+# For builds that do not circumvent DRM but still allow playback of unencrypted
+# discs (such as those authored by the user), leave out the following:
+# libdvdcss (and remove --with-libdvdcss from libdvdread's configure step)
+# libaacs
+# libbdplus
+
+# gpg-error and gcrypt are needed by other components, so leave those.
+
+
+++++++++++++++++++++
++ For DVD playback
+++++++++++++++++++++
+
+Dependency: libdvdcss
+=====================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libdvdcss.git && \
+cd libdvdcss && \
+autoreconf -fiv && \
+mkdir -p libdvdcss-build/i686 libdvdcss-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libdvdcss-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libdvdcss.spec && \
+    sudo checkinstall --pkgname=libdvdcss-mingw-i686 --pkgversion="$(grep Version \
+    src/libdvdcss.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libdvdcss.spec && \
+    sudo checkinstall --pkgname=libdvdcss-mingw-amd64 --pkgversion="$(grep Version \
+    src/libdvdcss.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libdvdread
+======================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libdvdread.git && \
+cd libdvdread && \
+autoreconf -fiv && \
+mkdir -p libdvdread-build/i686 libdvdread-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libdvdread-build/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --with-libdvdcss --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libdvdread-mingw-i686 --pkgversion="$(grep Version \
+    misc/dvdread.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --with-libdvdcss --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libdvdread-mingw-amd64 --pkgversion="$(grep Version \
+    misc/dvdread.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libdvdnav
+=====================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libdvdnav.git && \
+cd libdvdnav && \
+autoreconf -fiv && \
+mkdir -p libdvdnav-build/i686 libdvdnav-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libdvdnav-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm misc/libdvdnav.spec && \
+    sudo checkinstall --pkgname=libdvdnav-mingw-i686 --pkgversion="$(grep Version \
+    misc/dvdnav.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm misc/libdvdnav.spec && \
+    sudo checkinstall --pkgname=libdvdnav-mingw-amd64 --pkgversion="$(grep Version \
+    misc/dvdnav.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+
+++++++++++++++++++++++++
++ For Blu-ray playback
+++++++++++++++++++++++++
+
+Dependency: libgpg-error
+========================
+
+cd ~/mpv-build-deps && \
+git clone git://git.gnupg.org/libgpg-error.git && \
+cd libgpg-error && \
+autoreconf -fiv && \
+mkdir -p libgpg-error-build/i686 libgpg-error-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libgpg-error-build/i686 && \
+    CFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    RC="x86_64-w64-mingw32-windres -F pe-i386" ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --program-prefix=i686-w64-mingw32- \
+    --disable-nls --disable-rpath --enable-static --enable-silent-rules \
+    --disable-shared --disable-doc --disable-tests \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libgpg-error-mingw-i686 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+sudo cp src/gpg-error-config /usr/i686-w64-mingw32/bin && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CFLAGS="-march=core2" ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --program-prefix=x86_64-w64-mingw32- --disable-nls --disable-rpath \
+    --enable-static --enable-silent-rules --disable-shared --disable-doc \
+    --disable-tests --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libgpg-error-mingw-amd64 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+sudo cp src/gpg-error-config /usr/x86_64-w64-mingw32/bin && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libgcrypt
+=====================
+
+cd ~/mpv-build-deps && \
+git clone git://git.gnupg.org/libgcrypt.git && \
+cd libgcrypt && \
+    sed -i -e '31s/gost-s-box/gost-s-box$(EXEEXT)/' \
+    -e '137s/gost-s-box/gost-s-box$(EXEEXT)/' \
+    -e '138s/gost-s-box/gost-s-box$(EXEEXT)/' \
+    -e '140s/gost-s-box/gost-s-box$(EXEEXT)/' cipher/Makefile.am && \
+autoreconf -fiv && \
+mkdir -p libgcrypt-build/i686 libgcrypt-build/amd64 && \
+
+
+32-bit
+++++++
+
+# It's failing the exact same way libgpg-error did, so use the same tactic.
+
+# mpi asm fails to build under 32-bit. CPPAS?
+
+cd libgcrypt-build/i686 && \
+    CFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    RC="x86_64-w64-mingw32-windres -F pe-i386" ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --enable-static --disable-shared \
+    --disable-doc --datarootdir=/usr/i686-w64-mingw32/share/libgcrypt \
+    --with-gpg-error-prefix=/usr/i686-w64-mingw32 --enable-silent-rules \
+    --disable-asm --disable-aesni-support --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libgcrypt-mingw-i686 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+sudo ln -s /usr/i686-w64-mingw32/bin/libgcrypt-config /usr/i686-w64-mingw32/bin/i686-w64-mingw32-libgcrypt-config && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+# It's failing the exact same way libgpg-error did, so use the same tactic.
+# 64-bit libgcrypt-config is not getting installed
+
+cd ../amd64 && \
+    CFLAGS="-march=core2" ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --enable-static --disable-shared --disable-doc \
+    --datarootdir=/usr/x86_64-w64-mingw32/share/libgcrypt \
+    --with-gpg-error-prefix=/usr/x86_64-w64-mingw32 --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libgcrypt-mingw-amd64 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+sudo ln -s /usr/x86_64-w64-mingw32/bin/libgcrypt-config /usr/x86_64-w64-mingw32/bin/x86_64-w64-mingw32-libgcrypt-config && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libaacs
+===================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libaacs.git && \
+cd libaacs && \
+./bootstrap && \
+mkdir -p libaacs-build/i686 libaacs-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libaacs-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/libs" \
+    LIBS+="-L/usr/i686-w64-mingw32/lib -lgpg-error -lws2_32" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 \
+    --with-libgcrypt-prefix=/usr/i686-w64-mingw32 \
+    --with-gpg-error-prefix=/usr/i686-w64-mingw32 \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libaacs-mingw-i686 --pkgversion="$(grep Version \
+    src/libaacs.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    LIBS+="-L/usr/x86_64-w64-mingw32/lib -lgpg-error -lws2_32" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --with-libgcrypt-prefix=/usr/x86_64-w64-mingw32 \
+    --with-gpg-error-prefix=/usr/x86_64-w64-mingw32 \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libaacs-mingw-amd64 --pkgversion="$(grep Version \
+    src/libaacs.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libbdplus
+=====================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libbdplus.git && \
+cd libbdplus && \
+./bootstrap && \
+mkdir -p libbdplus/i686 libbdplus/amd64 && \
+
+
+32-bit
+++++++
+
+cd libbdplus/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    LIBS+="-L/usr/i686_64-w64-mingw32/lib -lgpg-error -lws2_32" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 \
+    --with-libgcrypt-prefix=/usr/i686-w64-mingw32 \
+    --with-gpg-error-prefix=/usr/i686-w64-mingw32 \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libbdplus-mingw-i686 --pkgversion="$(grep Version \
+    src/libbdplus.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-march=core2" \
+    LIBS+="-L/usr/x86_64-w64-mingw32/lib -lgpg-error -lws2_32" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --with-libgcrypt-prefix=/usr/x86_64-w64-mingw32 \
+    --with-gpg-error-prefix=/usr/x86_64-w64-mingw32 \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libbdplus-mingw-amd64 --pkgversion="$(grep Version \
+    src/libbdplus.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libudfread
+======================
+
+# Currently, libbluray embeds libudfread as a submodule, but
+# this is for whenever it *won't* do that.
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libudfread.git && \
+cd libudfread && \
+sed -i '40,42s/^/\/\//' src/udfread.c && \
+./bootstrap && \
+mkdir -p libudfread-build/i686 libudfread-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libudfread-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libudfread-mingw-i686 --pkgversion="$(git rev-list \
+    --count HEAD)-g$(git rev-parse --short HEAD)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libudfread-mingw-amd64 --pkgversion="$(git rev-list \
+    --count HEAD)-g$(git rev-parse --short HEAD)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libxml2
+===================
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.gnome.org/GNOME/libxml2.git && \
+cd libxml2 && \
+autoreconf -fiv && \
+mkdir -p libxml2-build/i686 libxml2-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libxml2-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --without-python --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libxml2.spec && \
+    sudo checkinstall --pkgname=libxml2-mingw-i686 --pkgversion="$(grep Version \
+    libxml-2.0.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --without-python --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libxml2.spec && \
+    sudo checkinstall --pkgname=libxml2-mingw-amd64 --pkgversion="$(grep Version \
+    libxml-2.0.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libxslt
+===================
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.gnome.org/GNOME/libxslt.git && \
+cd libxslt && \
+autoreconf -fiv && \
+mkdir -p libxslt-build/i686 libxslt-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libxslt-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --with-libxml-prefix=/usr/i686-w64-mingw32 --without-python \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libxslt.spec && \
+    sudo checkinstall --pkgname=libxslt-mingw-i686 --pkgversion="$(grep Version \
+    libxslt.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --with-libxml-prefix=/usr/x86_64-w64-mingw32 --without-python \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libxslt.spec && \
+    sudo checkinstall --pkgname=libxslt-mingw-amd64 --pkgversion="$(grep Version \
+    libxslt.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libbluray
+=====================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libbluray.git && \
+cd libbluray && \
+git submodule init && \
+git submodule update && \
+sed -i '40,42s/^/\/\//' contrib/libudfread/src/udfread.c && \
+./bootstrap && \
+mkdir -p libbluray-build/i686 libbluray-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libbluray-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/i686-w64-mingw32/lib ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --disable-examples \
+    --disable-bdjava-jar --disable-shared --disable-doxygen-doc \
+    --disable-doxygen-dot --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libbluray-mingw-i686 --pkgversion="$(grep Version \
+    src/libbluray.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/x86_64-w64-mingw32/lib ../../configure \
+    --prefix=/usr/x86_64-w64-mingw32 --disable-examples \
+    --disable-bdjava-jar --disable-shared --disable-doxygen-doc \
+    --disable-doxygen-dot --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libbluray-mingw-amd64 --pkgversion="$(grep Version \
+    src/libbluray.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+
+//////////////////////////////////
+/// Optional encoders/decoders
+//////////////////////////////////
+
+# The following encoders and/or decoders are completely optional, and don't have
+# an effect on building a functional copy of mpv.  Most of these actually end up
+# getting linked into FFmpeg, which then links into mpv.
+
+
+Dependency: Xvid (32-bit)
+=========================
+
+# This needs a bit of setup so that Subversion doesn't complain.
+# In .subversion/config, uncomment the following lines:
+# password stores = [blank out the options here]
+# store-passwords = [change to yes]
+# store-auth-creds = [change to yes]
+
+# And now to actually checkout and build Xvid.
+cd ~/mpv-build-deps && \
+svn checkout http://svn.xvid.org/trunk/xvidcore && \
+
+# Submit the following credentials for Xvid's SVN; instructions
+# taken from xvid.org's SVN usage instructions. You'll only need
+# to do this once, as the setup above will store the credentials.
+# Username: anonymous
+# Password: <leave blank>
+
+cd xvidcore/build/generic && \
+    sed -i -e '73 s/ $(SHARED_LIB)//' -e '143 s/ $(BUILD_DIR)\/$(SHARED_LIB)//' \
+    -e '152,166 s/^/#/' -e '221 s/^/#/' Makefile && \
+sed -i -e '32i our_cflags_defaults="$our_cflags_defaults $CPPFLAGS"' configure.in && \
+./bootstrap.sh && \
+
+
+32-bit
+++++++
+
+# --disable-assembly is needed because multilib cross-compilers confuse xvid,
+# preventing 32-bit builds of FFmpeg from linking to it.
+
+cp configure configure32 && \
+sed -i 's/ARCHITECTURE="X86_64"/ARCHITECTURE="IA32"/g' configure32 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure32 --prefix=/usr/i686-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=xvidcore-mingw-i686 --pkgversion="$(grep \
+    XVID_MAKE_VERSION ../../src/xvid.h | grep XVID_VERSION | \
+    sed -e 's/(/\t/g' -e 's/)//g' -e 's/,/./g' -e 's/.-/.0-/g' | \
+    cut -f2)+$(svn info | grep Revision | sed 's/Revision: //g')-$(date \
+    --rfc-3339=date | sed 's/-//g')-svn" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+# Xvid's build system is not conducive to out-of-tree builds, and
+# 'working' attempts to do so end up breaking the version querying
+# during checkinstall, so just don't.
+
+
+64-bit
+++++++
+
+make distclean && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=/usr/x86_64-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=xvidcore-mingw-amd64 --pkgversion="$(grep \
+    XVID_MAKE_VERSION ../../src/xvid.h | grep XVID_VERSION | \
+    sed -e 's/(/\t/g' -e 's/)//g' -e 's/,/./g' -e 's/.-/.0-/g' | \
+    cut -f2)+$(svn info | grep Revision | sed 's/Revision: //g')-$(date \
+    --rfc-3339=date | sed 's/-//g')-svn" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+# Xvid's build system is not conducive to out-of-tree builds, and
+# 'working' attempts to do so end up breaking the version querying
+# during checkinstall, so just don't.
+
+
+Dependency: L-SMASH
+===================
+
+# L-SMASH is actually only used by x264 (and modded x265, see below). It
+# can be omitted if you don't plan on using x264.exe, or if you don't
+# plan on outputting to MP4 from x264.exe.
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/l-smash/l-smash.git && \
+cd l-smash && \
+mkdir -p lsmash-build/i686 lsmash-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd lsmash-build/i686 && \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --target-os=mingw32 \
+    --cross-prefix=x86_64-w64-mingw32- --extra-cflags="-m32 -mfpmath=sse \
+    -march=pentium3 -msse -mtune=pentium3" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lsmash-mingw-i686 --pkgversion="0:$(git rev-list \
+    --count HEAD)-g$(git rev-parse --short HEAD)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --target-os=mingw32 \
+    --cross-prefix=x86_64-w64-mingw32- --extra-cflags="-march=core2" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=lsmash-mingw-amd64 --pkgversion="0:$(git rev-list \
+    --count HEAD)-g$(git rev-parse --short HEAD)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: FFmpeg (basic)
+==========================
+
+# Both x264 and x265 (Yuuki-Asuna) have the option of using LAVF
+# input.  This is provided by a very minimal build of FFmpeg that
+# will get removed later, since leaving it causes conflicts with
+# the fully-featured FFmpeg build and mpv at the end of this guide.
+
+# Technically, the basic FFmpeg build only needs to be installed to
+# the system if the user is building x265-Yuuki-Asuna.  x264 can very
+# easily use a basic FFmpeg installed to a non-system prefix.
+
+# In both of these cases, LAVF input is only used by the CLI side of
+# x264 and x265-Yuuki-Asuna, so if only the libx26[4|5] library is needed,
+# the FFmpeg and FFMS2 steps here can be omitted.
+
+cd ~/mpv-build-deps && \
+git clone git://source.ffmpeg.org/ffmpeg.git && \
+cd ffmpeg && \
+mkdir -p ffmpeg-build/i686 ffmpeg-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd ffmpeg-build/i686 && \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --enable-gpl --enable-version3 --disable-w32threads --enable-avresample \
+    --disable-encoders --disable-muxers --disable-doc --disable-debug \
+    --disable-devices --disable-avdevice --enable-avisynth --cpu=pentium3 \
+    --extra-cflags="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    --extra-ldflags="-m32 -L/usr/i686-w64-mingw32/lib" --target-os=mingw32 \
+    --arch=x86 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=ffmpeg-minimal-mingw-i686 --pkgversion="$(git \
+    rev-list --count HEAD)-g$(git rev-parse --short HEAD)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --enable-gpl --enable-version3 --disable-w32threads --enable-avresample \
+    --disable-encoders --disable-muxers --disable-doc --disable-debug \
+    --disable-devices --disable-avdevice --enable-avisynth --cpu=core2 \
+    --extra-cflags="-march=core2" --target-os=mingw32 --arch=x86_64 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=ffmpeg-minimal-mingw-amd64 --pkgversion="$(git \
+    rev-list --count HEAD)-g$(git rev-parse --short HEAD)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: FFMS2
+=================
+
+# Very finick-y with out-of-tree builds
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/qyot27/ffms2_cplugin.git && \
+cd ffms2_cplugin && \
+git checkout patches_plusvp9av1 && \
+mkdir -p ffms2-build/i686 ffms2-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd ffms2-build/i686 && \
+ln -s ../../* . && \
+    RCFLAGS="-F pe-i386" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ./configure \
+    --prefix=/usr/i686-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --host=x86_64-w64-mingw32 --extra-cppflags="-m32 -mfpmath=sse -march=pentium3 \
+    -msse -mtune=pentium3" --extra-ldflags="-m32 -L/usr/i686-w64-mingw32/lib" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=ffms2-mingw-i686 --pkgversion="$(grep Version ffms2.pc | \
+    cut -f2 -d " ")-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+make distclean && \
+cd ../amd64 && \
+ln -s ../../* . && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig ./configure \
+    --prefix=/usr/x86_64-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --host=x86_64-w64-mingw32 --extra-cppflags="-march=core2" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=ffms2-mingw-amd64 --pkgversion="$(grep Version ffms2.pc | \
+    cut -f2 -d " ")-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: x264
+================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/x264.git && \
+cd x264 && \
+mkdir -p x264-build/i686 x264-build/amd64 && \
+
+
+32-bit
+++++++
+
+# For a full x264 CLI:
+
+cd x264-build/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --enable-static --enable-strip --disable-win32thread --disable-opencl --disable-bashcompletion \
+    --host=i686-w64-mingw32 --extra-cflags="-m32 -mfpmath=sse -march=pentium3 \
+    -msse -mtune=pentium3" --extra-ldflags="$(PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    pkg-config --libs --static ffms2)" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=x264-mingw-i686 --pkgversion="$(grep \
+    Version x264.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+# For just the x264 library:
+
+cd x264-build/i686 && \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --enable-static --enable-strip --disable-win32thread --disable-cli --disable-opencl \
+    --host=i686-w64-mingw32 --extra-cflags="-m32 -mfpmath=sse -march=pentium3 \
+    -msse -mtune=pentium3" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=x264-mingw-i686 --pkgversion="$(grep \
+    Version x264.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+# For a full CLI:
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/x86_64-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --enable-static --enable-strip --disable-win32thread --disable-opencl --disable-bashcompletion \
+    --host=x86_64-w64-mingw32 --extra-cflags="-march=core2" \
+    --extra-ldflags="$(PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    pkg-config --libs --static ffms2)" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=x264-mingw-amd64 --pkgversion="$(grep \
+    Version x264.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+# For just the x264 library:
+
+cd ../amd64 && \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --enable-static --enable-strip --disable-win32thread --disable-cli --disable-opencl \
+    --host=x86_64-w64-mingw32 --extra-cflags="-march=core2" && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=x264-mingw-amd64 --pkgversion="$(grep \
+    Version x264.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: x265
+================
+
+# Enabling Windows XP support now requires using the -DWINXP_SUPPORT:bool=on
+# option, because the API default is now Win7.
+
+# msg7086 maintains a set of patches for x265 providing extra
+# input and output options.  The git migration on Bitbucket has made
+# this tricky again, so a blunt force version of the patch migration lives
+# below.
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/videolan/x265 && \
+cd x265 && \
+git remote add yuuki git://github.com/msg7086/x265-Yuuki-Asuna.git && \
+git fetch yuuki && \
+git checkout Yuuki && \
+git checkout master && \
+git checkout -b stable_new 07295ba7ab551bb9c1580fdaee3200f1b45711b7 && \
+git cherry-pick -31 Yuuki && \
+git checkout master && \
+git merge stable_new && \
+[resolve conflicts and commit]
+sed -i '29i#include <stdbool.h>' source/x265.h
+
+
+
+cd ~/mpv-build-deps/x265/source && \
+    mkdir -p x265-build/i686/12bit x265-build/i686/10bit x265-build/i686/8bit \
+    x265-build/amd64/12bit x265-build/amd64/10bit x265-build/amd64/8bit && \
+
+
+32-bit
+++++++
+
+# Build 12-bit:
+cd x265-build/i686/12bit && \
+    cmake ../../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="$HOME/x265_build/x265-12bit" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DHIGH_BIT_DEPTH:bool=on -DMAIN12:bool=on -DENABLE_SHARED:bool=off \
+    -DENABLE_ASSEMBLY:bool=off -DEXPORT_C_API:bool=off -DENABLE_CLI:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=x265-main12-mingw-i686 --pkgversion="$(grep X265_VERSION \
+    build.ninja | sed 's/X265_VERSION=/\t/' | cut -f2 | sed 's/ /\t/g' | cut -f1)-$(date \
+    --rfc-3339=date | sed 's/-//g')-hg" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default cp libx265.a /usr/i686-w64-mingw32/lib/libx265_main12.a && \
+mv *.deb ~/mingw_debs/i686
+
+# Build 10-bit:
+cd ../10bit && \
+    cmake ../../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="$HOME/x265_build/x265-10bit" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DHIGH_BIT_DEPTH:bool=on -DENABLE_SHARED:bool=off -DENABLE_ASSEMBLY:bool=off \
+    -DEXPORT_C_API:bool=off -DENABLE_CLI:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=x265-main10-mingw-i686 --pkgversion="$(grep X265_VERSION \
+    build.ninja | sed 's/X265_VERSION=/\t/' | cut -f2 | sed 's/ /\t/g' | cut -f1)-$(date \
+    --rfc-3339=date | sed 's/-//g')-hg" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default cp libx265.a /usr/i686-w64-mingw32/lib/libx265_main10.a && \
+mv *.deb ~/mingw_debs/i686
+
+# Only the .a files from 12-bit and 10-bit are installed to the system,
+# to reduce the chances of conflicts.
+
+# Build 8-bit:
+cd ../8bit && \
+    cmake ../../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DCMAKE_PREFIX_PATH="/usr/i686-w64-mingw32" -DCMAKE_SYSROOT=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_RC_FLAGS="-F pe-i386" -DCMAKE_RC_COMPILER_ARG1="-F pe-i386" \
+    -DENABLE_SHARED:bool=off -DEXTRA_LINK_FLAGS=-L. -DLINKED_10BIT:bool=on -DLINKED_12BIT:bool=on \
+    -DEXTRA_LIB="/usr/i686-w64-mingw32/lib/libx265_main10.a;/usr/i686-w64-mingw32/lib/libx265_main12.a" \
+    -DENABLE_LSMASH:bool=on -DENABLE_MKV:bool=on -DENABLE_AVISYNTH:bool=on -DENABLE_LAVF:bool=on \
+    -DENABLE_STATIC_LAVF:bool=on && \
+ninja && \
+sed -i 's/lx265/lx265 -lx265_main10 -lx265_main12/' x265.pc && \
+    sudo checkinstall --pkgname=x265-mingw-i686 --pkgversion="$(grep X265_VERSION \
+    build.ninja | sed 's/X265_VERSION=/\t/' | cut -f2 | sed 's/ /\t/g' | cut -f1)-$(date \
+    --rfc-3339=date | sed 's/-//g')-hg" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+# Finally, purge the basic FFmpeg so that no errors occur later on:
+
+sudo apt-get purge ffmpeg-minimal-mingw-i686
+
+
+64-bit
+++++++
+
+# Build 12-bit:
+cd ../../amd64/12bit && \
+    cmake ../../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="$HOME/x265_build/x265-12bit" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DHIGH_BIT_DEPTH:bool=on -DMAIN12:bool=on -DENABLE_SHARED:bool=off \
+    -DEXPORT_C_API:bool=off -DENABLE_CLI:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=x265-main12-mingw-amd64 --pkgversion="$(grep X265_VERSION \
+    build.ninja | sed 's/X265_VERSION=/\t/' | cut -f2 | sed 's/ /\t/g' | cut -f1)-$(date \
+    --rfc-3339=date | sed 's/-//g')-hg" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default cp libx265.a /usr/x86_64-w64-mingw32/lib/libx265_main12.a && \
+mv *.deb ~/mingw_debs/amd64
+
+# Build 10-bit:
+cd ../10bit && \
+    cmake ../../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="$HOME/x265_build/x265-10bit" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DHIGH_BIT_DEPTH:bool=on -DENABLE_SHARED:bool=off \
+    -DEXPORT_C_API:bool=off -DENABLE_CLI:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=x265-main10-mingw-amd64 --pkgversion="$(grep X265_VERSION \
+    build.ninja | sed 's/X265_VERSION=/\t/' | cut -f2 | sed 's/ /\t/g' | cut -f1)-$(date \
+    --rfc-3339=date | sed 's/-//g')-hg" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default cp libx265.a /usr/x86_64-w64-mingw32/lib/libx265_main10.a && \
+mv *.deb ~/mingw_debs/amd64
+
+# Only the .a files from 12-bit and 10-bit are installed to the system,
+# to reduce the chances of conflicts.
+
+# Build 8-bit:
+cd ../8bit && \
+    cmake ../../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_PREFIX_PATH="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DENABLE_SHARED:bool=off -DEXTRA_LINK_FLAGS=-L. -DLINKED_10BIT:bool=on -DLINKED_12BIT:bool=on \
+    -DEXTRA_LIB="/usr/x86_64-w64-mingw32/lib/libx265_main10.a;/usr/x86_64-w64-mingw32/lib/libx265_main12.a" \
+    -DENABLE_LSMASH:bool=on -DENABLE_MKV:bool=on -DENABLE_AVISYNTH:bool=on -DENABLE_LAVF:bool=on \
+    -DENABLE_STATIC_LAVF:bool=on && \
+ninja && \
+sed -i 's/lx265/lx265 -lx265_main10 -lx265_main12/' x265.pc && \
+    sudo checkinstall --pkgname=x265-mingw-amd64 --pkgversion="$(grep X265_VERSION \
+    build.ninja | sed 's/X265_VERSION=/\t/' | cut -f2 | sed 's/ /\t/g' | cut -f1)-$(date \
+    --rfc-3339=date | sed 's/-//g')-hg" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+# Finally, purge the basic FFmpeg so that no errors occur later on:
+
+sudo apt-get purge ffmpeg-minimal-mingw-amd64
+
+
+Dependency: dav1d
+=================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/dav1d && \
+cd dav1d && \
+mkdir -p dav1d-build/i686 dav1d-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd dav1d-build/i686 && \
+    meson ../.. --prefix=/usr/i686-w64-mingw32 --libdir=/usr/i686-w64-mingw32/lib \
+    --default-library static --cross-file x86_64-w64-mingw32-multilib32 \
+    -Denable_tests=false && \
+ninja && \
+    sudo checkinstall --pkgname=dav1d-mingw-i686 --pkgversion="$(grep Version \
+    meson-private/dav1d.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    meson ../.. --prefix=/usr/x86_64-w64-mingw32 --libdir=/usr/x86_64-w64-mingw32/lib \
+    --default-library static --cross-file x86_64-w64-mingw32 \
+    -Denable_tests=false && \
+ninja && \
+    sudo checkinstall --pkgname=dav1d-mingw-amd64 --pkgversion="$(grep Version \
+    meson-private/dav1d.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libsndfile
+======================
+
+cd ~/mpv-build-deps && \
+wget http://www.mega-nerd.com/libsndfile/files/libsndfile-1.0.28.tar.gz -O - | tar -xzvf - && \
+cd libsndfile-1.0.28 && \
+mkdir -p libsndfile-build/i686 libsndfile-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libsndfile-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -D_FORTIFY_SOURCE=0" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    RC="x86_64-w64-mingw32-windres -F pe-i386" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --disable-alsa --disable-external-libs --disable-sqlite \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libsndfile.spec && \
+    sudo checkinstall --pkgname=libsndfile-mingw-i686 --pkgversion="1:$(grep \
+    Version sndfile.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2 -D_FORTIFY_SOURCE=0" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --disable-alsa --disable-external-libs --disable-sqlite \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libsndfile.spec && \
+    sudo checkinstall --pkgname=libsndfile-mingw-amd64 --pkgversion="1:$(grep \
+    Version sndfile.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libbs2b
+===================
+
+cd ~/mpv-build-deps && \
+wget "http://downloads.sourceforge.net/project/bs2b/libbs2b/3.1.0/libbs2b-3.1.0.tar.lzma" -O - | tar -xJvf - && \
+cd libbs2b-3.1.0 && \
+mkdir -p libbs2b-build/i686 libbs2b-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libbs2b-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --disable-shared --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libbs2b-mingw-i686 --pkgversion="1:$(grep Version \
+    libbs2b.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/x86_64-w64-mingw32 --disable-shared --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libbs2b-mingw-amd64 --pkgversion="1:$(grep Version \
+    libbs2b.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: TwoLAME
+===================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/njh/twolame.git && \
+cd twolame/ && \
+	git checkout -b known_good 44ea171ccac71b659b55d3513a27f08f6021dbca && \
+mkdir build-scripts && \
+sed -i -e '29s/README/README.md/' -e '30s/NEWS/NEWS.md/' Makefile.am && \
+autoreconf -fiv && \
+mkdir -p twolame-build/i686 twolame-build/amd64 && \
+touch doc/twolame.1 && \
+
+
+32-bit
+++++++
+
+cd twolame-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --disable-shared --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm twolame.spec && \
+    sudo checkinstall --pkgname=twolame-mingw-i686 --pkgversion="1:$(grep Version \
+    twolame.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/x86_64-w64-mingw32 --disable-shared --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm twolame.spec && \
+    sudo checkinstall --pkgname=twolame-mingw-amd64 --pkgversion="1:$(grep Version \
+    twolame.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Lame
+================
+
+# will soon be relying on external libmpg123
+# for decoding. --disable-decoder can be used
+# to skip this in the meanwhile.
+
+cd ~/mpv-build-deps && \
+svn checkout https://svn.code.sf.net/p/lame/svn/trunk/lame lame && \
+cd lame && \
+autoreconf -fiv && \
+mkdir -p lame-build/i686 lame-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd lame-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-expopt=full --with-fileio=lame --enable-nasm --disable-decoder \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm lame.spec && \
+    sudo checkinstall --pkgname=lame-mingw-i686 --pkgversion="1:$(grep \
+    PACKAGE_VERSION config.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-svn" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --enable-expopt=full --with-fileio=lame --enable-nasm --disable-decoder \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm lame.spec && \
+    sudo checkinstall --pkgname=lame-mingw-amd64 --pkgversion="1:$(grep \
+    PACKAGE_VERSION config.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-svn" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libogg
+==================
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.xiph.org/xiph/ogg.git && \
+cd ogg/ && \
+autoreconf -fiv && \
+mkdir -p ogg-build/i686 ogg-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd ogg-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libogg.spec && \
+    sudo checkinstall --pkgname=libogg-mingw-i686 --pkgversion="1:$(grep Version \
+    ogg.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libogg.spec && \
+    sudo checkinstall --pkgname=libogg-mingw-amd64 --pkgversion="1:$(grep Version \
+    ogg.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Vorbis
+==================
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.xiph.org/xiph/vorbis.git && \
+cd vorbis/ && \
+autoreconf -I m4 -fiv && \
+mkdir -p vorbis-build/i686 vorbis-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd vorbis-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-oggtest \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 \
+    --target=i686-w64-mingw32 && \
+make -j$(nproc) && \
+rm libvorbis.spec && \
+    sudo checkinstall --pkgname=libvorbis-mingw-i686 --pkgversion="1:$(grep \
+    Version vorbis.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-oggtest \
+    --disable-shared --enable-silent-rules --host=x86_64-w64-mingw32 \
+    --target=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libvorbis.spec && \
+    sudo checkinstall --pkgname=libvorbis-mingw-amd64 --pkgversion="1:$(grep \
+    Version vorbis.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Theora
+==================
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.xiph.org/xiph/theora.git && \
+cd theora && \
+autoreconf -fiv && \
+mkdir -p theora-build/i686 theora-build/amd64 && \
+cp configure configure32 && \
+sed -i -e 's/cpu_x86_64=yes/cpu_x86_32=yes/g' -e 's/64 bit x86/32 bit x86/g' -e 's/OC_X86_64_ASM//g' configure32 && \
+
+
+32-bit
+++++++
+
+cd theora-build/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure32 --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --disable-oggtest --disable-vorbistest --disable-doc --disable-spec \
+    --disable-examples --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libtheora.spec && \
+    sudo checkinstall --pkgname=libtheora-mingw-i686 --pkgversion="1:$(grep \
+    Version theora.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --disable-oggtest --disable-vorbistest --disable-doc --disable-spec \
+    --disable-examples --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+rm libtheora.spec && \
+    sudo checkinstall --pkgname=libtheora-mingw-amd64 --pkgversion="1:$(grep \
+    Version theora.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Opus
+================
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.xiph.org/xiph/opus.git && \
+cd opus && \
+autoreconf -fiv && \
+mkdir -p opus-build/i686 opus-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd opus-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -D_FORTIFY_SOURCE=0" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-doc \
+    --disable-shared --enable-custom-modes --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libopus-mingw-i686 --pkgversion="1:$(grep Version \
+    opus.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2 -D_FORTIFY_SOURCE=0" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-doc \
+    --disable-shared --enable-custom-modes --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libopus-mingw-amd64 --pkgversion="1:$(grep Version \
+    opus.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libvpx
+==================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/webmproject/libvpx.git && \
+cd libvpx && \
+mkdir -p libvpx-build/i686 libvpx-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libvpx-build/i686 && \
+    CFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    CXXFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    CROSS=x86_64-w64-mingw32- ../../configure --prefix=/usr/i686-w64-mingw32 \
+    --target=x86-win32-gcc --cpu=pentium3 \
+    --disable-examples --disable-unit-tests --disable-docs \
+    --enable-vp8 --enable-vp9 --enable-postproc --enable-vp9-postproc \
+    --enable-vp9-temporal-denoising --enable-vp9-highbitdepth \
+    --enable-webm-io --enable-libyuv --enable-runtime-cpu-detect \
+    --enable-multi-res-encoding && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libvpx-mingw-i686 --pkgversion="1:$(grep Version \
+    vpx.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CFLAGS="-march=core2" \
+    CXXFLAGS="-march=core2" \
+    CROSS=x86_64-w64-mingw32- ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --target=x86_64-win64-gcc --cpu=core2 \
+    --disable-examples --disable-unit-tests --disable-docs \
+    --enable-vp8 --enable-vp9 --enable-postproc --enable-vp9-postproc \
+    --enable-vp9-temporal-denoising --enable-vp9-highbitdepth \
+    --enable-webm-io --enable-libyuv --enable-runtime-cpu-detect \
+    --enable-multi-res-encoding && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libvpx-mingw-amd64 --pkgversion="1:$(grep Version \
+    vpx.pc | sed 's/Version: //g')-$(date --rfc-3339=date | sed 's/-//g')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: AOMedia AV1
+=======================
+
+cd ~/mpv-build-deps && \
+git clone https://aomedia.googlesource.com/aom && \
+cd aom && \
+mkdir -p aom-build/i686 aom-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd aom-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_SYSTEM_PROCESSOR="x86" -DENABLE_DOCS:bool=off -DENABLE_NASM:bool=on \
+    -DENABLE_TESTS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=aom-mingw-i686 --pkgversion="$(grep \
+    Version aom.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DCMAKE_SYSTEM_PROCESSOR="x86_64" -DENABLE_DOCS:bool=off -DENABLE_NASM:bool=on \
+    -DENABLE_TESTS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=aom-mingw-amd64 --pkgversion="$(grep \
+    Version aom.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libiLBC
+===================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/TimothyGu/libilbc.git && \
+cd libilbc && \
+autoreconf -fiv && \
+mkdir -p libilbc-build/i686 libilbc-build/amd64 && \
+
+
+32-bit
+++++++
+
+# Currently there's a bug with the CMakeLists.txt that doesn't
+# honor -m32 to build pe-i386 *.obj files, so use autotools.
+
+cd libilbc-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libilbc-mingw-i686 --pkgversion="1:$(grep \
+    Version libilbc.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" \
+    -DBUILD_SHARED_LIBS:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=libilbc-mingw-amd64 --pkgversion="1:$(grep \
+    Version libilbc.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libgsm
+==================
+
+# Cannot be built out-of-tree
+
+
+32-bit
+++++++
+
+cd ~/mpv-build-deps && \
+wget http://www.imagemagick.org/download/delegates/ffmpeg/gsm-1.0.13.tar.bz2 -O - | tar -xjvf - && \
+cd gsm-1.0.13 && \
+    sed -i -e 's/gcc\ -ansi/x86_64-w64-mingw32-gcc\ -ansi/g' \
+    -e 's/=\ ar/=\ x86_64-w64-mingw32-ar/g' \
+    -e 's/=\ ranlib/=\ x86_64-w64-mingw32-ranlib/g' \
+    -e 's/INSTALL_ROOT\t=/INSTALL_ROOT\t=\ \$HOME\/gsmbuild/g' \
+    -e '47 s/$/ $(CPPFLAGS)/' \
+    -e '285ilib:\t\t$(LIBGSM)\n\t\t@-echo lib: Done.\n' Makefile && \
+CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" make lib && \
+mkdir -p gsmbuild/include/gsm && \
+cp inc/gsm.h gsmbuild/include/gsm && \
+cp -R -L lib/ gsmbuild/ && \
+cd gsmbuild && \
+    sudo checkinstall --pkgname=libgsm-mingw-i686 --pkgversion="1.0.13-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default cp -R * /usr/i686-w64-mingw32 && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../../ && \
+sudo rm -R gsm-1.0.13 && \
+wget http://www.imagemagick.org/download/delegates/ffmpeg/gsm-1.0.13.tar.bz2 -O - | tar -xjvf - && \
+cd gsm-1.0.13 && \
+    sed -i -e 's/gcc\ -ansi/x86_64-w64-mingw32-gcc\ -ansi/g' \
+    -e 's/=\ ar/=\ x86_64-w64-mingw32-ar/g' \
+    -e 's/=\ ranlib/=\ x86_64-w64-mingw32-ranlib/g' \
+    -e 's/INSTALL_ROOT\t=/INSTALL_ROOT\t=\ \$HOME\/gsmbuild/g' \
+    -e '47 s/$/ $(CPPFLAGS)/' \
+    -e '285ilib:\t\t$(LIBGSM)\n\t\t@-echo lib: Done.\n' Makefile && \
+CPPFLAGS="-march=core2" make lib && \
+mkdir -p gsmbuild/include/gsm && \
+cp inc/gsm.h gsmbuild/include/gsm && \
+mv lib/ gsmbuild/ && \
+cd gsmbuild && \
+    sudo checkinstall --pkgname=libgsm-mingw-amd64 --pkgversion="1.0.13-$(date \
+    --rfc-3339=date | sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default cp -R * /usr/x86_64-w64-mingw32 && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libshine
+====================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/toots/shine.git && \
+cd shine && \
+autoreconf -fiv && \
+
+
+32-bit
+++++++
+
+# Out of tree builds not working
+
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ./configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libshine-mingw-i686 --pkgversion="$(grep Version \
+    shine.pc | sed 's/Version: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+# Out of tree builds not working
+
+make distclean && \
+    CPPFLAGS="-march=core2" \
+    ./configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --enable-silent-rules --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libshine-mingw-amd64 --pkgversion="$(grep Version \
+    shine.pc | sed 's/Version: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libspeex
+====================
+
+cd ~/mpv-build-deps && \
+git clone https://gitlab.xiph.org/xiph/speex.git && \
+cd speex && \
+autoreconf -fiv && \
+mkdir -p speex-build/i686 speex-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd speex-build/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    LIBS+="-lwinmm" CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared --enable-sse \
+    --enable-vorbis-psy --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libspeex-mingw-i686 --pkgversion="$(grep Version \
+    speex.pc | sed 's/Version: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    LIBS+="-lwinmm" CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared --enable-sse \
+    --enable-vorbis-psy --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libspeex-mingw-amd64 --pkgversion="$(grep Version \
+    speex.pc | sed 's/Version: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: OpenCORE-AMR
+========================
+
+cd ~/mpv-build-deps && \
+git clone git://git.code.sf.net/p/opencore-amr/code opencore-amr && \
+cd opencore-amr && \
+autoreconf -fiv && \
+mkdir -p opencoreamr-build/i686 opencoreamr-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd opencoreamr-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libopencore-amr-mingw-i686 --pkgversion="$(grep \
+    Version amrwb/opencore-amrwb.pc | sed 's/Version: /\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libopencore-amr-mingw-amd64 --pkgversion="$(grep \
+    Version amrwb/opencore-amrwb.pc | sed 's/Version: /\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: vo-amrwbenc
+=======================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/mstorsjo/vo-amrwbenc.git && \
+cd vo-amrwbenc && \
+autoreconf -fiv && \
+mkdir -p vo-amrwbenc-build/i686 vo-amrwbenc-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd vo-amrwbenc-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libvo-amrwbenc-mingw-i686 --pkgversion="$(grep \
+    Version vo-amrwbenc.pc | sed 's/Version: /\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libvo-amrwbenc-mingw-amd64 --pkgversion="$(grep \
+    Version vo-amrwbenc.pc | sed 's/Version: /\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: xavs
+================
+
+cd ~/mpv-build-deps && \
+svn checkout svn://svn.code.sf.net/p/xavs/code/trunk xavs && \
+cd xavs && \
+mkdir -p xavs-build/i686 xavs-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd xavs-build/i686 && \
+ln -s ../../* . && \
+cp configure configure32 && \
+sed -i -e '237s/X86_64/X86/' -e 's/ -m amd64//g' configure32 && \
+    ./configure32 --prefix=/usr/i686-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --extra-cflags="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 \
+    -fno-tree-vectorize" --extra-ldflags="-m32 -L/usr/i686-w64-mingw32/lib" \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libxavs-mingw-i686 --pkgversion="$(grep Version \
+    xavs.pc | sed 's/Version: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')-svn" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+make distclean && \
+cd ../amd64 && \
+ln -s ../../* . && \
+    ./configure --prefix=/usr/x86_64-w64-mingw32 --cross-prefix=x86_64-w64-mingw32- \
+    --extra-cflags="-march=core2 -fno-tree-vectorize" --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libxavs-mingw-amd64 --pkgversion="$(grep Version \
+    xavs.pc | sed 's/Version: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')-svn" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: game-music-emu
+==========================
+
+cd ~/mpv-build-deps && \
+git clone https://bitbucket.org/mpyne/game-music-emu.git && \
+cd game-music-emu && \
+git checkout -b known_good a8da3a1992d2e099201392d630d99ef2c3f070ee && \
+mkdir -p gme-build/i686 gme-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd gme-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DBUILD_SHARED_LIBS:bool=off -DENABLE_UBSAN:bool=off \
+    -DZLIB_LIBRARY_RELEASE="/usr/i686-w64-mingw32/lib/libz.a" && \
+ninja && \
+    sudo checkinstall --pkgname=libgme-mingw-i686 --pkgversion="1:$(grep \
+    Version gme/libgme.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-svn" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" \
+    -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DBUILD_SHARED_LIBS:bool=off -DENABLE_UBSAN:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=libgme-mingw-amd64 --pkgversion="1:$(grep \
+    Version gme/libgme.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-svn" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libmodplug
+======================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/Konstanty/libmodplug && \
+cd libmodplug && \
+sed -i '144,155s/WIN32/WIN32 OR (MINGW OR MSYS)/' CMakeLists.txt && \
+mkdir -p libmodplug-build/i686 libmodplug-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libmodplug-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" && \
+ninja && \
+    sudo checkinstall --pkgname=libmodplug-mingw-i686 --pkgversion="$(grep Version \
+    libmodplug.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_CXX_FLAGS="-march=core2" && \
+ninja && \
+    sudo checkinstall --pkgname=libmodplug-mingw-amd64 --pkgversion="$(grep Version \
+    libmodplug.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+
+////////////////////////////
+/// Optional I/O drivers
+////////////////////////////
+
+++++++++++++++++++++++++++
++ Input drivers: libcdio
+++++++++++++++++++++++++++
+
+Dependency: libcdio
+===================
+
+cd ~/mpv-build-deps && \
+git clone git://git.savannah.gnu.org/libcdio.git && \
+cd libcdio && \
+touch doc/version.texi src/cd-drive.1 src/cd-info.1 src/cd-read.1 src/iso-info.1 src/iso-read.1 && \
+autoreconf -fiv && \
+mkdir -p libcdio-build/i686 libcdio-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libcdio-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -U_HAVE_STRNDUP" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --disable-shared --disable-cddb \
+    --disable-cxx --disable-vcd-info --host=x86_64-w64-mingw32 \
+    --datarootdir=/usr/i686-w64-mingw32/share/libcdio && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libcdio-mingw-i686 --pkgversion="$(grep Version \
+    libcdio.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2 -U_HAVE_STRNDUP" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/x86_64-w64-mingw32 --disable-shared --disable-cddb \
+    --disable-cxx --disable-vcd-info --host=x86_64-w64-mingw32 \
+    --datarootdir=/usr/x86_64-w64-mingw32/share/libcdio && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libcdio-mingw-amd64 --pkgversion="$(grep Version \
+    libcdio.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libcdio-paranoia
+============================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/rocky/libcdio-paranoia.git && \
+cd libcdio-paranoia && \
+autoreconf -fiv && \
+mkdir -p libcdio-paranoia/i686 libcdio-paranoia/amd64 && \
+
+
+32-bit
+++++++
+
+cd libcdio-paranoia/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/i686-w64-mingw32 --disable-shared --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libcdio-paranoia-mingw-i686 --pkgversion="$(grep \
+    Version libcdio_paranoia.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=/usr/x86_64-w64-mingw32 --disable-shared --enable-silent-rules \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libcdio-paranoia-mingw-amd64 --pkgversion="$(grep \
+    Version libcdio_paranoia.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
++++++++++++++++++++++++++++++++++++++++
++ Input drivers: Networking protocols
++++++++++++++++++++++++++++++++++++++++
+
+Dependency: GMP
+===============
+
+# GMP is only necessary to enable FFmpeg's support for Windows'
+# native SChannel TLS layer. This guide, however, advises the
+# use of mbedTLS instead. The GMP instructions are left here as
+# an optional choice for the user.
+
+cd ~/mpv-build-deps && \
+wget https://gmplib.org/download/gmp/gmp-6.2.0.tar.xz -O - | tar -xJvf - && \
+cd gmp-6.2.0 && \
+mkdir -p gmp-build/i686 gmp-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd gmp-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -fexceptions" \
+    LDFLAGS="-m32 -L/usr/x86_64-w64-mingw32/lib" ABI=32 \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --enable-fat \
+    --disable-shared --enable-static --enable-cxx --enable-silent-rules \
+    --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=gmp-mingw-i686 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | cut -f2 -d "\"")-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2 -fexceptions" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --enable-fat \
+    --disable-shared --enable-static --enable-cxx --enable-silent-rules \
+    --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=gmp-mingw-amd64 --pkgversion="$(grep \
+    PACKAGE_VERSION config.h | cut -f2 -d "\"")-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: mbedTLS
+===================
+
+# mbedTLS, formerly known as PolarSSL, is an independent,
+# GPL-compatible SSL/TLS implementation that builds quickly
+# and doesn't require the tangle of tricky dependencies that
+# GnuTLS does. It's also preferable to Windows' native SSL
+# implementation.
+
+# mbedtls is also preferred over gcrypt for the things
+# FFmpeg uses gcrypt for, so when configuring FFmpeg,
+# --enable-mbedtls and --enable-gcrypt should be considered
+# mutually exclusive.  gcrypt is still necessary for libaacs,
+# though.
+
+# The submodules for crypto in the development branch cause
+# issues with FFmpeg, default back to master branch.
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/ARMmbed/mbedtls.git && \
+cd mbedtls && \
+git checkout master && \
+mkdir -p mbedtls-build/i686 mbedtls-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd mbedtls-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" && \
+ninja && \
+    sudo checkinstall --pkgname=mbedtls-mingw-i686 --pkgversion="$(grep \
+    MBEDTLS_VERSION_STRING include/mbedtls/version.h | head -1 | \
+    cut -f2 -d "\"")-$(date --rfc-3339=date | sed 's/-//g')-git" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" && \
+ninja && \
+    sudo checkinstall --pkgname=mbedtls-mingw-amd64 --pkgversion="$(grep \
+    MBEDTLS_VERSION_STRING include/mbedtls/version.h | head -1 | \
+    cut -f2 -d "\"")-$(date --rfc-3339=date | sed 's/-//g')-git" --backup=no \
+    --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
++++++++++++++++++++++++++++++++
++ Output drivers: Direct3D 11
++++++++++++++++++++++++++++++++
+
+Dependency: shaderc
+===================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/google/shaderc.git && \
+cd shaderc && \
+git checkout known-good && \
+mkdir -p shaderc-build/i686 shaderc-build/amd64 && \
+./update_shaderc_sources.py && \
+
+
+32-bit
+++++++
+
+cd shaderc-build/i686 && \
+    cmake ../../src/ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_EXE_LINKER_FLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=shaderc-mingw-i686 --pkgversion="$(head -1 \
+    build-version.inc | cut -f3 -d " " | sed -e 's/^v//' -e 's/\\n\"//')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../src/ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=shaderc-mingw-amd64 --pkgversion="$(head -1 \
+    build-version.inc | cut -f3 -d " " | sed -e 's/^v//' -e 's/\\n\"//')-git" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes --fstrans=no \
+    --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: SPIRV-Cross
+=======================
+
+# SPIRV-Cross only installs the .pc file if building as shared,
+# so we need to move the SPRIV_CROSS_SHARED check to below the
+# pkgconfig install section.
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/KhronosGroup/SPIRV-Cross.git && \
+cd SPIRV-Cross && \
+sed -i -e '347iif (SPIRV_CROSS_SHARED)' -e '337d' CMakeLists.txt && \
+mkdir -p spirvcross-build/i686 spirvcross-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd spirvcross-build/i686 && \
+    cmake ../../ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_EXE_LINKER_FLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    -DSPIRV_CROSS_ENABLE_TESTS:bool=off && \
+ninja && \
+sed -i 's/-shared//g' spirv-cross-c-shared.pc && \
+mv spirv-cross-c-shared.pc spirv-cross.pc && \
+    sudo checkinstall --pkgname=spirvcross-mingw-i686 --pkgversion="$(grep Version \
+    spirv-cross-c-shared.pc | cut -f2 -d " ")-git" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DSPIRV_CROSS_ENABLE_TESTS:bool=off && \
+ninja && \
+sed -i 's/-shared//g' spirv-cross-c-shared.pc && \
+mv spirv-cross-c-shared.pc spirv-cross.pc && \
+    sudo checkinstall --pkgname=spirvcross-mingw-amd64 --pkgversion="$(grep Version \
+    spirv-cross-c-shared.pc | cut -f2 -d " ")-git" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+++++++++++++++++++++++++++
++ Output drivers: Vulkan
+++++++++++++++++++++++++++
+
+# Currently, there's a linking failure in libkernel32.a with Vulkan and mpv when
+# cross-compiling.
+
+Dependency: Vulkan-Headers
+==========================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/KhronosGroup/Vulkan-Headers.git && \
+cd Vulkan-Headers && \
+mkdir -p vulkan-headers-build/i686 vulkan-headers-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd vulkan-headers-build/i686 && \
+cmake ../../ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 && \
+    sudo checkinstall --pkgname=vulkan-headers-mingw-i686 --pkgversion="$(git \
+    describe --tags | sed 's/^v//')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+cmake ../../ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 && \
+    sudo checkinstall --pkgname=vulkan-headers-mingw-amd64 --pkgversion="$(git \
+    describe --tags | sed 's/^v//')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: Vulkan-Loader
+=========================
+
+cd ~/mpv-build-deps && \
+wget https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v8.0.0.tar.bz2 -O - | tar -xjvf - && \
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/KhronosGroup/Vulkan-Loader.git && \
+cd Vulkan-Loader && \
+wget https://raw.githubusercontent.com/shinchiro/mpv-winbuild-cmake/master/packages/vulkan-0001-cross-compile-static-linking-hacks.patch && \
+patch -p1 < vulkan-0001-cross-compile-static-linking-hacks.patch && \
+sed -i -e '135,202s/^/#/' -e '252s/^/#/' loader/CMakeLists.txt && \
+mkdir -p vulkan-loader-build/i686 vulkan-loader-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd vulkan-loader-build/i686 && \
+    cmake ../../ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_EXE_LINKER_FLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    -DBUILD_TESTS:bool=off -DCMAKE_SYSROOT=/usr/i686-w64-mingw32 -DENABLE_STATIC_LOADER:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=vulkan-loader-mingw-i686 --pkgversion="$(git \
+    describe --tags | sed 's/^v//')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DCMAKE_CXX_FLAGS="-march=core2" \
+    -DBUILD_TESTS:bool=off -DCMAKE_SYSROOT=/usr/x86_64-w64-mingw32 -DENABLE_STATIC_LOADER:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=vulkan-loader-mingw-amd64 --pkgversion="$(git \
+    describe --tags | sed 's/^v//')-git" --backup=no --deldoc=yes --delspec=yes \
+    --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libepoxy
+====================
+
+# epoxy.pc's use of Requires causes it to try to link
+# to the native Linux version of gl, not MinGW's.
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/anholt/libepoxy.git && \
+cd libepoxy && \
+mkdir -p libepoxy-build/i686 libepoxy-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libepoxy-build/i686 && \
+    meson ../.. --prefix=/usr/i686-w64-mingw32 --libdir=/usr/i686-w64-mingw32/lib \
+    --default-library static --cross-file x86_64-w64-mingw32-multilib32 && \
+sed -i '12s/^/#/' meson-private/epoxy.pc && \
+ninja && \
+    sudo checkinstall --pkgname=libepoxy-mingw-i686 --pkgversion="$(grep Version \
+    meson-private/epoxy.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    meson ../.. --prefix=/usr/x86_64-w64-mingw32 --libdir=/usr/x86_64-w64-mingw32/lib \
+    --default-library static --cross-file x86_64-w64-mingw32 && \
+sed -i '12s/^/#/' meson-private/epoxy.pc && \
+ninja && \
+    sudo checkinstall --pkgname=libepoxy-mingw-amd64 --pkgversion="$(grep Version \
+    meson-private/epoxy.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: libplacebo
+======================
+
+cd ~/mpv-build-deps && \
+git clone https://code.videolan.org/videolan/libplacebo.git && \
+cd libplacebo && \
+sed -i 's/shaderc_shared/shaderc/' src/meson.build && \
+mkdir -p libplacebo-build/i686 libplacebo-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libplacebo-build/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig meson ../.. \
+    --prefix=/usr/i686-w64-mingw32 --libdir=/usr/i686-w64-mingw32/lib \
+    --default-library static -Dvulkan-registry=../../../Vulkan-Headers/registry/vk.xml \
+    --cross-file x86_64-w64-mingw32-multilib32 && \
+ninja && \
+    sudo checkinstall --pkgname=libplacebo-mingw-i686 --pkgversion="$(grep Version \
+    meson-private/libplacebo.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig meson ../.. \
+    --prefix=/usr/x86_64-w64-mingw32 --libdir=/usr/x86_64-w64-mingw32/lib \
+    --default-library static -Dvulkan-registry=../../../Vulkan-Headers/registry/vk.xml \
+    --cross-file x86_64-w64-mingw32 && \
+ninja && \
+    sudo checkinstall --pkgname=libplacebo-mingw-amd64 --pkgversion="$(grep Version \
+    meson-private/libplacebo.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
++++++++++++++++++++++++++++++++++
++ Output drivers: Miscellaneous
++++++++++++++++++++++++++++++++++
+
+Dependency: libcaca
+===================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/cacalabs/libcaca.git && \
+cd libcaca && \
+touch ./ChangeLog && \
+sed -i -e '617,631d' -e '352,356d' -e '358d' -e '39,47d' caca/string.c && \
+sed -i -e '643,662d' caca/figfont.c && \
+sed -i -e 's/src //g' -e 's/examples //g' Makefile.am && \
+sed -i -e '15s/^CFLAGS +=/AM_CFLAGS =/' ruby/Makefile.am && \
+autoreconf -fiv && \
+mkdir -p libcaca-build/i686 libcaca-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libcaca-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -DCACA_STATIC" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --disable-doc --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libcaca-mingw-i686 --pkgversion="$(grep Version \
+    caca/caca.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2 -DCACA_STATIC" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --disable-doc --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libcaca-mingw-amd64 --pkgversion="$(grep Version \
+    caca/caca.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: SDL 2.0
+===================
+
+cd ~/mpv-build-deps && \
+wget http://www.libsdl.org/release/SDL2-2.0.12.tar.gz -O - | tar -xzvf - && \
+cd SDL2-2.0.12 && \
+sed -i 's/WINDOWS OR CYGWIN/MSVC OR CYGWIN/g' CMakeLists.txt && \
+sed -i 's/-mwindows//g' CMakeLists.txt && \
+mkdir -p sdl2-build/i686 sdl2-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd sdl2-build/i686 && \
+    CFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DBUILD_SHARED_LIBS:bool=off \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" && \
+ninja && \
+    sudo checkinstall --pkgname=sdl2-mingw-i686 --pkgversion="$(grep Version \
+    sdl2.pc | sed 's/: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CFLAGS="-march=core2" cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DBUILD_SHARED_LIBS:bool=off \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" && \
+ninja && \
+    sudo checkinstall --pkgname=sdl2-mingw-amd64 --pkgversion="$(grep Version \
+    sdl2.pc | sed 's/: /\t/g' | cut -f2)-$(date --rfc-3339=date | \
+    sed 's/-//g')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: openal
+==================
+
+cd ~/mpv-build-deps && \
+git clone git://repo.or.cz/openal-soft.git && \
+cd openal-soft && \
+sed -i '10s/$/ -lole32/' openal.pc.in && \
+mkdir -p openal-build/i686 openal-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd openal-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DLIBTYPE=STATIC -DALSOFT_UTILS:bool=off -DALSOFT_EXAMPLES:bool=off \
+    -DALSOFT_BACKEND_WINMM:bool=off \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DCMAKE_CXX_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" && \
+ninja && \
+    sudo checkinstall --pkgname=openal-mingw-i686 --pkgversion="$(grep Version \
+    openal.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DLIBTYPE=STATIC -DALSOFT_UTILS:bool=off -DALSOFT_EXAMPLES:bool=off \
+    -DALSOFT_BACKEND_WINMM:bool=off \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" -DCMAKE_CXX_FLAGS="-march=core2" && \
+ninja && \
+    sudo checkinstall --pkgname=openal-mingw-amd64 --pkgversion="$(grep Version \
+    openal.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
++++++++++++++++++++
++ Filter: vid.stab
++++++++++++++++++++
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/georgmartius/vid.stab.git && \
+cd vid.stab && \
+mkdir -p vidstab-build/i686 vidstab-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd vidstab-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    -DBUILD_SHARED_LIBS:bool=off -DUSE_OMP:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=vidstab-mingw-i686 --pkgversion="$(grep Version \
+    vidstab.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+# There's a problem locating OpenMP, so disable it for now.
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" \
+    -DBUILD_SHARED_LIBS:bool=off -DUSE_OMP:bool=off && \
+ninja && \
+    sudo checkinstall --pkgname=vidstab-mingw-amd64 --pkgversion="$(grep Version \
+    vidstab.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+# There's a problem locating OpenMP, so disable it for now.
+
+
+++++++++++++++++++
++ Filter: libsoxr
+++++++++++++++++++
+
+cd ~/mpv-build-deps && \
+git clone git://git.code.sf.net/p/soxr/code libsoxr && \
+cd libsoxr && \
+mkdir -p libsoxr-build/i686 libsoxr-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd libsoxr-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/i686-w64-mingw32" -DBUILD_SHARED_LIBS:bool=off \
+    -DWITH_OPENMP:bool=off -DWITH_CR32S:bool=on \
+    -DWITH_CR64S:bool=off -DBUILD_EXAMPLES:bool=off -DBUILD_TESTS:bool=off -DBUILD_LSR_TESTS:bool=off \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" && \
+ninja && \
+    sudo checkinstall --pkgname=libsoxr-mingw-i686 --pkgversion="$(grep -r \
+    SOXR_THIS_VERSION_STR ../../src/soxr.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX="/usr/x86_64-w64-mingw32" -DBUILD_SHARED_LIBS:bool=off \
+    -DWITH_OPENMP:bool=off -DWITH_CR32S:bool=off \
+    -DWITH_CR64S:bool=on -DBUILD_EXAMPLES:bool=off -DBUILD_TESTS:bool=off -DBUILD_LSR_TESTS:bool=off \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-march=core2" && \
+ninja && \
+    sudo checkinstall --pkgname=libsoxr-mingw-amd64 --pkgversion="$(grep -r \
+    SOXR_THIS_VERSION_STR ../../src/soxr.h | sed 's/\"/\t/g' | cut -f2)-$(date \
+    --rfc-3339=date | sed 's/-//g')-git" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
++++++++++++++++
++ Filter: zimg
++++++++++++++++
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/sekrit-twc/zimg.git && \
+cd zimg && \
+autoreconf -fiv && \
+mkdir -p zimg-build/i686 zimg-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd zimg-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ../../configure --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=zimg-mingw-i686 --pkgversion="$(grep Version \
+    zimg.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=zimg-mingw-amd64 --pkgversion="$(grep Version \
+    zimg.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+++++++++++++++++++++++
++ Demuxer: AviSynth+
+++++++++++++++++++++++
+
+Dependency: DirectShow BaseClasses
+==================================
+
+# Required only to build the DirectShowSource plugin,
+# which shouldn't be anything other than a last resort
+# these days.  And DirectShowSource doesn't build with
+# GCC yet, making this moot at the current time.
+
+cd ~/mpv-build-deps && \
+wget http://devel.ag-projects.com/repositories/windows/mingw-w64-dshow-baseclasses/baseclasses.tgz -O - | tar -xzvf - && \
+cd BaseClasses && \
+mkdir -p baseclasses-build/i686/include baseclasses-build/i686/lib \
+baseclasses-build/amd64/include baseclasses-build/amd64/lib  && \
+cp *.h baseclasses-build/i686/include && \
+cp *.h baseclasses-build/amd64/include
+
+
+32-bit:
++++++++
+
+sed -i -e '20s/=/=$(CROSS)/' -e '21s/=/=$(EXTRA_CXXFLAGS) /' Makefile && \
+    make -j$(nproc) CROSS=x86_64-w64-mingw32- EXTRA_CXXFLAGS="-m32 \
+    -I/usr/i686-w64-mingw32/include -mfpmath=sse -march=pentium3 \
+    -msse -mtune=pentium3" && \
+cp *.a baseclasses-build/i686/lib && \
+cd baseclasses-build/i686 && \
+    sudo checkinstall --pkgname=dshowbaseclasses-mingw-i686 --pkgversion=7 \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default cp -R * /usr/i686-w64-mingw32 && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit:
++++++++
+
+cd ../../ && \
+make clean && \
+make -j$(nproc) CROSS=x86_64-w64-mingw32- EXTRA_CXXFLAGS="-march=core2" && \
+cp *.a baseclasses-build/amd64/lib && \
+cd baseclasses-build/amd64 && \
+    sudo checkinstall --pkgname=dshowbaseclasses-mingw-amd64 --pkgversion=7 \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default cp -R * /usr/x86_64-w64-mingw32 && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: AviSynth+
+=====================
+
+# AviSynth+ doesn't actually get linked to anything here,
+# since x264 and FFmpeg (and by extension, anything that
+# uses FFmpeg) load AviSynth.dll dynamically at runtime.
+
+# Further, 32-bit GCC builds of AviSynth+ require an
+# entirely separate build of FFmpeg, as documented later.
+# Cutting down on the possible confusion here is one reason
+# I'm putting this in the guide.
+
+# DirectShowSource also can't yet build with GCC, 
+# but it's disabled by default due to requiring
+# external dependencies.
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/AviSynth/AviSynthPlus.git && \
+cd AviSynthPlus && \
+mkdir -p avisynth-build/i686 avisynth-build/amd64 && \
+
+
+32-bit:
++++++++
+
+cd avisynth-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_C_FLAGS="-m32" -DCMAKE_CXX_FLAGS="-m32" -DCMAKE_RC_FLAGS="-F pe-i386" \
+    -DCMAKE_SYSTEM_PROCESSOR=i686 && \
+ninja && \
+    sudo checkinstall --pkgname=avisynthplus-mingw-i686 --pkgversion="$(grep -r \
+    Version avs_core/avisynth.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/i686
+
+
+Headers-only:
++++++++++++++
+
+cd avisynth-build/i686 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/i686-w64-mingw32 \
+    -DHEADERS_ONLY:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=avisynthplus-mingw-i686 --pkgversion="$(grep -r \
+    Version avs_core/avisynth.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+
+
+64-bit:
++++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DCMAKE_TOOLCHAIN_FILE="/usr/x86_64-w64-mingw32/toolchain-x86_64-w64-mingw32.cmake" \
+    -DCMAKE_SYSTEM_PROCESSOR=amd64 && \
+ninja && \
+    sudo checkinstall --pkgname=avisynthplus-mingw-amd64 --pkgversion="$(grep -r \
+    Version avs_core/avisynth.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Headers-only:
++++++++++++++
+
+cd ../amd64 && \
+    cmake ../../ -G "Ninja" -DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32 \
+    -DHEADERS_ONLY:bool=on && \
+ninja && \
+    sudo checkinstall --pkgname=avisynthplus-mingw-amd64 --pkgversion="$(grep -r \
+    Version avs_core/avisynth.pc | cut -f2 -d " ")-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default ninja install && \
+
+
+++++++++++++++++++++++++
++ Demuxer: VapourSynth
+++++++++++++++++++++++++
+
+Dependency: Python 3
+====================
+
+# Python is notoriously difficult to cross-compile, but luckily
+# it's fairly easy to use the already-packaged distribution of
+# Python for Windows, with the headers from a normal Python
+# source tarball.
+
+cd ~/mpv-build-deps && \
+wget https://www.python.org/ftp/python/3.8.6/Python-3.8.6.tar.xz -O - | tar -xJvf - && \
+cd Python-3.8.6 && \
+mkdir -p $HOME/pythonheaders/i686-w64-mingw32/lib/pkgconfig $HOME/pythonheaders/x86_64-w64-mingw32/lib/pkgconfig && \
+sed -i 's/#include <crypt.h>/\/\/#include <crypt.h>/g' Include/Python.h && \
+sed -i 's/#include <sys\/select.h>/\/\/#include <sys\/select.h>/g' Include/pyport.h && \
+    CXXFLAGS="-m32" ./configure --prefix=$HOME/pythonheaders/i686-w64-mingw32 \
+    --build=x86_64-w64-mingw32 --host=x86_64-w64-mingw32 && \
+make inclinstall && \
+cp Misc/python.pc $HOME/pythonheaders/i686-w64-mingw32/lib/pkgconfig && \
+make distclean && \
+    ./configure --prefix=$HOME/pythonheaders/x86_64-w64-mingw32 --build=x86_64-w64-mingw32 \
+    --host=x86_64-w64-mingw32 && \
+make inclinstall && \
+cp Misc/python.pc $HOME/pythonheaders/x86_64-w64-mingw32/lib/pkgconfig && \
+
+
+32-bit
+++++++
+
+# In order to accomplish static linking, we have to manipulate the
+# python38.dll that ships in the embeddable Python zipfile.
+
+cd ~/mpv-build-deps && \
+wget https://www.python.org/ftp/python/3.8.6/python-3.8.6-embed-win32.zip && \
+7za x -opython38_i686 python-3.8.6-embed-win32.zip && \
+cd python38_i686 && \
+gendef python38.dll && \
+x86_64-w64-mingw32-dlltool -m i386 --as-flags="--32" --output-delaylib $HOME/pythonheaders/i686-w64-mingw32/lib/libpython3.8m.a --input-def python38.def && \
+
+
+64-bit
+++++++
+
+# In order to accomplish static linking, we have to manipulate the
+# python38.dll that ships in the embeddable Python zipfile.
+
+cd ~/mpv-build-deps && \
+wget https://www.python.org/ftp/python/3.8.6/python-3.8.6-embed-amd64.zip && \
+7za x -opython38_amd64 python-3.8.6-embed-amd64.zip && \
+cd python38_amd64 && \
+gendef python38.dll && \
+x86_64-w64-mingw32-dlltool --output-delaylib $HOME/pythonheaders/x86_64-w64-mingw32/lib/libpython3.8m.a --input-def python38.def && \
+
+
+Final packaging
++++++++++++++++
+
+# The following will install the libraries and headers to both 32-bit
+# and 64-bit directory paths.  If building only one or the other, simply navigate
+# into the i686-w64-mingw32 or x86_64-w64-mingw32 directories under
+# $HOME/pythonheaders and use the checkinstall command from there.
+
+cd $HOME/pythonheaders && \
+sed -i -e '1iprefix=/usr/i686-w64-mingw32' -e '1,2d' i686-w64-mingw32/lib/pkgconfig/python.pc && \
+sed -i -e '1iprefix=/usr/x86_64-w64-mingw32' -e '1,2d' x86_64-w64-mingw32/lib/pkgconfig/python.pc && \
+    sudo checkinstall --pkgname=python-minimal-mingw --pkgversion="3.8" \
+    --backup=no --deldoc=yes --delspec=yes --deldesc=yes --strip=yes \
+    --fstrans=no --default cp -R * /usr && \
+mv *.deb ~/mingw_debs
+
+
+Dependency: VapourSynth
+=======================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/vapoursynth/vapoursynth.git && \
+cd vapoursynth && \
+./autogen.sh && \
+sed -i '31s/Windows/windows/' src/vsscript/vsscript.cpp && \
+sed -i '40s/FORCE_INLINE inline/FORCE_INLINE /' src/core/genericfilters.cpp && \
+sed -i '8s/\"Python.h\"/\<Python.h\>/' include/cython/vapoursynth_api.h && \
+mkdir -p vapoursynth-build/i686 vapoursynth-build/amd64 && \
+
+
+32-bit
+++++++
+
+cd vapoursynth-build/i686 && \
+    CPPFLAGS="-m32 -DVS_CORE_EXPORTS" LDFLAGS="-m32 -L/usr/i686-w64-mingw32" \
+    PYTHON3_CFLAGS="-I/usr/i686-w64-mingw32/include/python3.8" \
+    PYTHON3_LIBS="-L/usr/i686-w64-mingw32/lib -lpython3.8m" \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/i686-w64-mingw32/lib \
+    ../../configure --prefix=/usr/i686-w64-mingw32 \
+    --disable-shared --disable-vspipe --disable-python-module \
+    --disable-plugins --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+sed -i '/Requires.private/d' pc/vapoursynth-script.pc && \
+    sudo checkinstall --pkgname=vapoursynth-mingw-i686 --pkgversion="$(grep \
+    Version pc/vapoursynth.pc | sed 's/Version: //g')R-r"$(git rev-list \
+    --count HEAD)-g"$(git rev-parse --short HEAD)" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2 -DVS_CORE_EXPORTS" \
+    PYTHON3_CFLAGS="-I/usr/x86_64-w64-mingw32/include/python3.8" \
+    PYTHON3_LIBS="-L/usr/x86_64-w64-mingw32/lib -lpython3.8m" \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG_LIBDIR=/usr/x86_64-w64-mingw32/lib \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 \
+    --disable-shared --disable-vspipe --disable-python-module \
+    --disable-plugins --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+sed -i '/Requires.private/d' pc/vapoursynth-script.pc && \
+    sudo checkinstall --pkgname=vapoursynth-mingw-amd64 --pkgversion="$(grep \
+    Version pc/vapoursynth.pc | sed 's/Version: //g')R-r"$(git rev-list \
+    --count HEAD)-g"$(git rev-parse --short HEAD)" --backup=no --deldoc=yes \
+    --delspec=yes --deldesc=yes --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+
+/////////////////////////
+/// FFmpeg and libass
+/////////////////////////
+
+# Now that all the basic and/or optional stuff is out of the way, it's time to
+# build the stuff immediately necessary for mpv.
+
+
+Dependency: libass
+==================
+
+cd ~/mpv-build-deps && \
+git clone git://github.com/libass/libass.git && \
+cd libass && \
+
+# Force freetype2 version to use release version not libtool version.
+# 9.10.3 is really old, but I'm too lazy to figure out how old, so just
+# use the current major:
+sed -i 's/9.10.3/2.10.0/' configure.ac && \
+
+autoreconf -fiv && \
+mkdir -p libass-build/i686 libass-build/amd64 && \
+cp configure configure32 && \
+sed -i -e 's/X64=true/X64=false/' -e 's/BITS=64/BITS=32/' -e 's/BITTYPE=64/BITTYPE=32/' -e 's/DARCH_X86_64=1/DARCH_X86_64=0/' configure32 && \
+
+
+32-bit
+++++++
+
+# Remember to have created a symlink to libpng16.pc as libpng.pc
+# beforehand, otherwise Freetype2 won't be detected correctly for
+# 32-bit.
+
+# DirectWrite may be the natural choice for Windows, but it incurs a
+# startup penalty on playback.
+
+cd libass-build/i686 && \
+    CPPFLAGS="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_LIBDIR=/usr/i686-w64-mingw32/lib \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG="pkg-config --static" \
+    ../../configure32 --prefix=/usr/i686-w64-mingw32 --disable-shared \
+    --disable-directwrite --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libass-mingw-i686 --pkgversion="$(grep Version \
+    libass.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/i686
+
+
+64-bit
+++++++
+
+# DirectWrite may be the natural choice for Windows, but it incurs a
+# startup penalty on playback.
+
+cd ../amd64 && \
+    CPPFLAGS="-march=core2" \
+    PKG_CONFIG_LIBDIR=/usr/x86_64-w64-mingw32/lib \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    PKG_CONFIG="pkg-config --static" \
+    ../../configure --prefix=/usr/x86_64-w64-mingw32 --disable-shared \
+    --disable-directwrite --host=x86_64-w64-mingw32 && \
+make -j$(nproc) && \
+    sudo checkinstall --pkgname=libass-mingw-amd64 --pkgversion="$(grep Version \
+    libass.pc | sed 's/Version: //g')-$(date --rfc-3339=date | \
+    sed 's/-//g')-git" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --fstrans=no --default && \
+mv *.deb ~/mingw_debs/amd64
+
+
+Dependency: FFmpeg
+==================
+
+cd ~/mpv-build-deps && \
+git clone git://source.ffmpeg.org/ffmpeg.git && \
+cd ffmpeg && \
+mkdir -p ffmpeg-build/i686 ffmpeg-build/i686-avsgcc ffmpeg-build/amd64 && \
+    git pull git://github.com/qyot27/FFmpeg.git new_pkgconfig \
+    datetime silent_invoke versioninfo && \
+
+# Press Ctrl+X to commit using nano
+
+
+32-bit
+++++++
+
+# FFmpeg updates so frequently that it's best to install it to a local area.
+
+# Declaring --pkg-config-flags="--static" is necessary for fontconfig,
+# libmodplug, SDL, and libx265 to link.
+
+# If you want to enable both OpenAL and libbs2b, add
+# --extra-ldflags="-Wl,--allow-multiple-definition".
+
+cd ffmpeg-build/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    ../../configure \
+    --prefix=$HOME/ffmpeg_build/32bit \
+    --cross-prefix=x86_64-w64-mingw32- \
+    --progs-suffix=32 \
+    --enable-gpl \
+    --enable-version3 \
+    --disable-w32threads \
+    --disable-doc \
+    --disable-debug \
+    --enable-concise-version \
+    --enable-mbedtls \
+    --enable-fontconfig \
+    --enable-libfreetype \
+    --enable-libfribidi \
+    --enable-libass \
+    --enable-libbluray \
+    --enable-libcaca \
+    --enable-libcdio \
+    --enable-opengl \
+    --enable-libsoxr \
+    --enable-libvidstab \
+    --enable-libzimg \
+    --enable-libaom \
+    --enable-libdav1d \
+    --enable-libgme \
+    --enable-libgsm \
+    --enable-libilbc \
+    --enable-libmodplug \
+    --enable-libmp3lame \
+    --enable-libopencore-amrnb \
+    --enable-libopencore-amrwb \
+    --enable-libopenjpeg \
+    --enable-libopus \
+    --enable-libshine \
+    --enable-libsnappy \
+    --enable-libspeex \
+    --enable-libtheora \
+    --enable-libtwolame \
+    --enable-libvo-amrwbenc \
+    --enable-libvorbis \
+    --enable-libvpx \
+    --enable-libwebp \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-libxavs \
+    --enable-libxvid \
+    --enable-avisynth \
+    --enable-vapoursynth \
+    --cpu=pentium3 \
+    --extra-cflags="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -DCACA_STATIC -DMODPLUG_STATIC -DVS_CORE_EXPORTS" \
+    --extra-ldflags="-m32 -L/usr/i686-w64-mingw32/lib" \
+    --target-os=mingw32 \
+    --arch=x86 \
+    --pkg-config-flags="--static" && \
+make -j$(nproc) && \
+make install
+
+# currently not getting detected:
+# openal (--enable-openal \)
+
+
+# For an FFmpeg with no optional external components (except AviSynth):
+
+cd ffmpeg-build/i686 && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=$HOME/ffmpeg_build/32bit --cross-prefix=x86_64-w64-mingw32- \
+    --progs-suffix=32 --enable-gpl --enable-version3 --disable-w32threads \
+    --disable-doc --enable-avisynth --cpu=pentium3 --extra-cflags="-m32 -mfpmath=sse \
+    -march=pentium3 -msse -mtune=pentium3" --extra-ldflags="-m32 -L/usr/i686-w64-mingw32/lib" \
+    --target-os=mingw32 --arch=x86 && \
+make -j$(nproc) && \
+make install
+
+
+32-bit (avsgcc)
++++++++++++++++
+
+# FFmpeg updates so frequently that it's best to install it to a local area.
+
+# Declaring --pkg-config-flags="--static" is necessary for fontconfig,
+# libmodplug, SDL, vapoursynth and libx265 to link.
+
+# If you want to enable both OpenAL and libbs2b, add
+# --extra-ldflags="-Wl,--allow-multiple-definition".
+
+cd ../i686-avsgcc && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig \
+    ../../configure \
+    --prefix=$HOME/ffmpeg_build/32bit-avsgcc \
+    --cross-prefix=x86_64-w64-mingw32- \
+    --progs-suffix=32-avsgcc \
+    --enable-gpl \
+    --enable-version3 \
+    --disable-w32threads \
+    --disable-doc \
+    --disable-debug \
+    --enable-concise-version \
+    --enable-mbedtls \
+    --enable-fontconfig \
+    --enable-libfreetype \
+    --enable-libfribidi \
+    --enable-libass \
+    --enable-libbluray \
+    --enable-libcaca \
+    --enable-libcdio \
+    --enable-opengl \
+    --enable-libsoxr \
+    --enable-libvidstab \
+    --enable-libzimg \
+    --enable-libaom \
+    --enable-libdav1d \
+    --enable-libgme \
+    --enable-libgsm \
+    --enable-libilbc \
+    --enable-libmodplug \
+    --enable-libmp3lame \
+    --enable-libopencore-amrnb \
+    --enable-libopencore-amrwb \
+    --enable-libopenjpeg \
+    --enable-libopus \
+    --enable-libshine \
+    --enable-libsnappy \
+    --enable-libspeex \
+    --enable-libtheora \
+    --enable-libtwolame \
+    --enable-libvo-amrwbenc \
+    --enable-libvorbis \
+    --enable-libvpx \
+    --enable-libwebp \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-libxavs \
+    --enable-libxvid \
+    --enable-avisynth \
+    --enable-vapoursynth \
+    --cpu=pentium3 \
+    --extra-cflags="-m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -DCACA_STATIC -DMODPLUG_STATIC -DVS_CORE_EXPORTS -DAVSC_WIN32_GCC32" \
+    --extra-ldflags="-m32 -L/usr/i686-w64-mingw32/lib" \
+    --target-os=mingw32 \
+    --arch=x86 \
+    --pkg-config-flags="--static" && \
+make -j$(nproc) && \
+make install
+
+# currently not getting detected:
+# openal (--enable-openal \)
+
+
+# For an FFmpeg with no optional external components (except AviSynth):
+
+cd ../i686-avsgcc && \
+    PKG_CONFIG_PATH=/usr/i686-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=$HOME/ffmpeg_build/32bit-avsgcc --cross-prefix=x86_64-w64-mingw32- \
+    --progs-suffix=32-avsgcc --enable-gpl --enable-version3 --disable-w32threads \
+    --disable-doc --enable-avisynth --cpu=pentium3 --extra-cflags="-m32 -mfpmath=sse \
+    -march=pentium3 -msse -mtune=pentium3 -DAVSC_WIN32_GCC32" --extra-ldflags="-m32 -L/usr/i686-w64-mingw32/lib" \
+    --target-os=mingw32 --arch=x86 && \
+make -j$(nproc) && \
+make install
+
+
+64-bit
+++++++
+
+# FFmpeg updates so frequently that it's best to install it to a local area.
+
+# Declaring --pkg-config-flags="--static" is necessary for fontconfig,
+# libmodplug, SDL, and libx265 to link.
+
+# If you want to enable both OpenAL and libbs2b, or use shared libx264, add
+# --extra-ldflags="-Wl,--allow-multiple-definition".
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig \
+    ../../configure \
+    --prefix=$HOME/ffmpeg_build/64bit \
+    --cross-prefix=x86_64-w64-mingw32- \
+    --enable-gpl \
+    --enable-version3 \
+    --disable-w32threads \
+    --disable-doc \
+    --disable-debug \
+    --enable-concise-version \
+    --enable-mbedtls \
+    --enable-fontconfig \
+    --enable-libfreetype \
+    --enable-libfribidi \
+    --enable-libass \
+    --enable-libbluray \
+    --enable-libcaca \
+    --enable-libcdio \
+    --enable-opengl \
+    --enable-libsoxr \
+    --enable-libvidstab \
+    --enable-libzimg \
+    --enable-libaom \
+    --enable-libdav1d \
+    --enable-libgme \
+    --enable-libgsm \
+    --enable-libilbc \
+    --enable-libmodplug \
+    --enable-libmp3lame \
+    --enable-libopencore-amrnb \
+    --enable-libopencore-amrwb \
+    --enable-libopenjpeg \
+    --enable-libopus \
+    --enable-libshine \
+    --enable-libsnappy \
+    --enable-libspeex \
+    --enable-libtheora \
+    --enable-libtwolame \
+    --enable-libvo-amrwbenc \
+    --enable-libvorbis \
+    --enable-libvpx \
+    --enable-libwebp \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-libxavs \
+    --enable-libxvid \
+    --enable-avisynth \
+    --enable-vapoursynth \
+    --cpu=core2 \
+    --extra-cflags="-march=core2 -DCACA_STATIC -DMODPLUG_STATIC -DVS_CORE_EXPORTS" \
+    --target-os=mingw32 \
+    --arch=x86_64 \
+    --pkg-config-flags="--static" && \
+make -j$(nproc) && \
+make install
+
+# currently not getting detected:
+# openal (--enable-openal \)
+
+# For an FFmpeg with no optional external components, except AviSynth:
+
+cd ../amd64 && \
+    PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/lib/pkgconfig ../../configure \
+    --prefix=$HOME/ffmpeg_build/64bit --cross-prefix=x86_64-w64-mingw32- --enable-gpl \
+    --enable-version3 --disable-w32threads --disable-doc \
+    --enable-avisynth --cpu=core2 --extra-cflags="-march=core2" --target-os=mingw32 \
+    --arch=x86_64 && \
+make -j$(nproc) && \
+make install
+
+
+
+////////////////////
+/// Building mpv
+////////////////////
+
+# mpv is a major component, so its source directory will not be in
+# mpv-build-deps, but in $HOME itself.
+
+32-bit
+++++++
+
+# Vulkan and SPIRV-Cross are having issues on 32-bit again; disable them.
+
+cd ~/ && \
+git clone git://github.com/mpv-player/mpv.git && \
+cd ~/mpv && \
+./bootstrap.py && \
+    CFLAGS="-DHAVE_GPL -m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 \
+    -DCACA_STATIC -DVS_CORE_EXPORTS" LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    LINKFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    WINDRES="x86_64-w64-mingw32-windres -F pe-i386" \
+    PKG_CONFIG_LIBDIR="$HOME/ffmpeg_build/32bit/lib:/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH="$HOME/ffmpeg_build/32bit/lib/pkgconfig:/usr/i686-w64-mingw32/lib/pkgconfig" \
+    TARGET=x86_64-w64-mingw32 ./waf configure --prefix=$HOME/mpv_build/32bit --out=mpv-build/i686 \
+    --disable-debug-build --enable-static-build --enable-openal --enable-sdl2 \
+    --enable-dvdnav --enable-cdda --disable-vulkan --disable-spirv-cross --disable-manpage-build \
+    --disable-pdf-build && \
+./waf build && \
+./waf install && \
+strip ~/mpv_build/32bit/bin/mpv.exe && \
+strip ~/mpv_build/32bit/bin/mpv.com
+
+# In case a debug build is needed, remove --disable-debug from ./configure and
+# don't run the strip command.
+
+# Prepare for further packaging:
+
+MPV_RELVER=mpv_r$(git rev-list --count HEAD) && \
+cd ~/mpv_build/32bit/bin && \
+mkdir -p $MPV_RELVER/32bit && \
+mv mpv.exe mpv.com $MPV_RELVER/32bit
+
+
+32-bit (avsgcc)
++++++++++++++++
+
+cd ~/mpv && \
+    CFLAGS="-DHAVE_GPL -m32 -mfpmath=sse -march=pentium3 -msse -mtune=pentium3 \
+    -DCACA_STATIC -DVS_CORE_EXPORTS" LDFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    LINKFLAGS="-m32 -L/usr/i686-w64-mingw32/lib" \
+    WINDRES="x86_64-w64-mingw32-windres -F pe-i386" \
+    PKG_CONFIG_LIBDIR="$HOME/ffmpeg_build/32bit-avsgcc/lib:/usr/i686-w64-mingw32/lib" \
+    PKG_CONFIG_PATH="$HOME/ffmpeg_build/32bit-avsgcc/lib/pkgconfig:/usr/i686-w64-mingw32/lib/pkgconfig" \
+    TARGET=x86_64-w64-mingw32 ./waf configure --prefix=$HOME/mpv_build/32bit-avsgcc --out=mpv-build/i686-avsgcc \
+    --disable-debug-build --enable-static-build --enable-openal --enable-sdl2 \
+    --enable-dvdnav --enable-cdda --disable-vulkan --disable-spirv-cross --disable-manpage-build \
+    --disable-pdf-build && \
+./waf build && \
+./waf install && \
+strip ~/mpv_build/32bit-avsgcc/bin/mpv.exe && \
+strip ~/mpv_build/32bit-avsgcc/bin/mpv.com
+
+# In case a debug build is needed, remove --disable-debug from ./configure and
+# don't run the strip command.
+
+# Prepare for further packaging:
+
+MPV_RELVER=mpv_r$(git rev-list --count HEAD) && \
+cd ~/mpv_build/32bit-avsgcc/bin && \
+mkdir -p ~/mpv_build/32bit/bin/$MPV_RELVER/32bit-avsgcc && \
+mv mpv.exe mpv.com ~/mpv_build/32bit/bin/$MPV_RELVER/32bit-avsgcc
+
+
+64-bit
+++++++
+
+cd ~/mpv && \
+    CFLAGS="-DHAVE_GPL -march=core2 -DCACA_STATIC -DVS_CORE_EXPORTS" \
+    PKG_CONFIG_LIBDIR="$HOME/ffmpeg_build/64bit/lib:/usr/x86_64-w64-mingw32/lib" \
+    PKG_CONFIG_PATH="$HOME/ffmpeg_build/64bit/lib/pkgconfig:/usr/x86_64-w64-mingw32/lib/pkgconfig" \
+    TARGET=x86_64-w64-mingw32 ./waf configure --prefix=$HOME/mpv_build/64bit --out=mpv-build/amd64 \
+    --disable-debug-build --enable-static-build --enable-openal --enable-sdl2 \
+    --enable-dvdnav --enable-cdda --disable-vulkan --disable-spirv-cross --disable-manpage-build \
+    --disable-pdf-build && \
+./waf build && \
+./waf install && \
+strip ~/mpv_build/64bit/bin/mpv.exe && \
+strip ~/mpv_build/64bit/bin/mpv.com
+
+# In case a debug build is needed, remove --disable-debug from ./configure and
+# don't run the strip command.
+
+# And finally, to package everything into a 7zip archive.
+
+MPV_RELVER=mpv_r$(git rev-list --count HEAD) && \
+cd ~/mpv_build/64bit/bin && \
+mkdir -p ~/mpv_build/32bit/bin/$MPV_RELVER/64bit && \
+mv mpv.exe mpv.com ~/mpv_build/32bit/bin/$MPV_RELVER/64bit && \
+cd ~/mpv_build/32bit/bin && \
+7za a -mx9 ~/$MPV_RELVER.7z $MPV_RELVER/

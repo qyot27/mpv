@@ -1,0 +1,350 @@
+
+///////////////
+/// Preface
+///////////////
+
+# mpv can be cross-compiled for either 32-bit or 64-bit Windows from a Linux
+# host by using MinGW-w64.  MinGW-w64 is available from
+# http://mingw-w64.sourceforge.net.
+
+//////////////////////////////////////
+/// Advanced (manual) instructions
+//////////////////////////////////////
+
+# This guide was written under Ubuntu (starting with 12.10), but realistically,
+# any Debian-based system should work as far as the apt commands go, and/or any
+# arbitrary Linux distribution could probably be used on the pure compilation
+# stuffs. Even [64-bit] Windows 10 using the Ubuntu-based Windows Subsystem for Linux
+# should work.
+
+# The main guide assumes that you're running a 64-bit version of Ubuntu. However,
+# the instructions for setting up the 32-bit compiler and building the 32-bit
+# components can be used on 32-bit Ubuntu directly.
+
+# Make sure you have a list of other necessary build system and source download
+# components.
+
+    sudo apt-get install build-essential checkinstall yasm nasm cvs git gperf \
+    subversion mercurial hg-fast-export automake* autoconf* libtool* m4 bison \
+    flex p7zip-full lzip texinfo help2man tofrodos texi2html docutils-common \
+    cmake pkgconf bzr autopoint ninja-build gettext binfmt-support ruby \
+    python-lxml doxygen gtk-doc-tools
+
+# Any time \ is at the end of a line, it means the command spans multiple lines.
+# Make sure to copy the entire command.  To make this easier to see, such
+# commands have been indented.
+
+# Wine is helpful for testing binaries while still under Ubuntu, and for more
+# rigorously making the compilation process assume it's being run on Windows.
+# The preferred way to handle this is by installing from the official PPA.
+
+sudo dpkg --add-architecture i386 && \
+wget https://dl.winehq.org/wine-builds/Release.key -O - | sudo apt-key add - && \
+sudo apt-add-repository "https://dl.winehq.org/wine-builds/ubuntu/" && \
+sudo apt-get update && \
+sudo apt-get install --install-recommends winehq-devel wine-binfmt && \
+sudo update-binfmts --import wine
+
+
+# You'll notice that there are certain cpu optimization flags used by the
+# majority of steps in this guide (core2 for 64-bit, or pentium3 for 32-bit).
+# These are simply due to what I feel are respectable baselines for each, so
+# feel free to either omit them, or to use ones that match your setup. For the
+# list of CPU types and SIMD flags, consult GCC's CPU optimization info at:
+# http://gcc.gnu.org/onlinedocs/gcc/x86-Options.html
+
+
+
+//////////////////////////////////
+/// MinGW-w64/GCC installation
+//////////////////////////////////
+
+# The first step to cross-compiling is to actually have a cross-compilation
+# environment.  Earlier versions of this guide used Zeranoe's build script as
+# the method to generate this initial toolchain, but in the interest of
+# flexibility I've opted to go with manually building these components as well.
+# The instructions are based on what Zeranoe's build script used to do, as we're
+# assuming the user will install this toolchain to the system as a replacement
+# or alternative to the repository version.
+
+# Any of the make steps can be executed in parallel by specifying the
+# --jobs/-j parameter with the number of cores your CPU has.  This guide
+# makes this automatic by using -j$(nproc), which will detect the number
+# of cores and use a corresponding number of jobs.  This is only relevant
+# for make, since ninja uses all cores by default.
+
+# First, we need a staging area, so that all the packages don't clutter up your
+# home directory:
+
+mkdir mingw-packages
+
+# Additionally, all of these will be getting installed to non-system areas
+# initially, since most of them actually don't get installed and are only needed
+# during the build process, and the others need to be in a correct directory
+# hierarchy before being installed.
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++
++ Building 32-bit cross-compilation environment
++++++++++++++++++++++++++++++++++++++++++++++++++
+
+# To build the 32-bit environment, we're going to use a 32-bit Ubuntu
+# VM in Virtualbox.  The reason for this is that there are occasionally
+# issues that crop up with using multilib-enabled compilers, and this
+# can cause severe problems for trying to build working cross-compilers.
+# So it's just safer if we build the 32-bit cross environment under an
+# actual 32-bit OS.  The 32-bit environment will get merged with the
+# 64-bit environment and installed as one piece at the end of this section.
+
+# I'm not going to instruct how to set up the Virtualbox environment,
+# just simply have a vanilla 32-bit install in there, preferably with any
+# updates installed.  Refer back to the top of the guide to get the
+# build tools installed and the mingw-packages directory set up, as those are
+# the same for 32-bit or 64-bit.
+
+
+Dependency: Binutils
+====================
+
+cd ~/mingw-packages && \
+git clone -b binutils-2_30-branch --depth 1 git://sourceware.org/git/binutils-gdb.git && \
+cd binutils-gdb && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-i686 --disable-shared \
+    --enable-static --disable-nls --disable-multilib --build=i686-pc-linux-gnu \
+    --target=i686-w64-mingw32 --with-sysroot=$HOME/mingw-build/mingw-w64-i686 && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: MinGW-w64 headers
+=============================
+
+# Setting --enable-secure-api disables support for Windows XP throughout the cross
+# environment. This guide won't explicitly support XP in the build steps anymore,
+# but those places where XP support can be regained with a configuration option
+# will be noted.
+
+cd ~/mingw-packages && \
+git clone -b v5.x --depth 1 git://github.com/mingw-w64/mingw-w64.git && \
+cd mingw-w64/mingw-w64-headers && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-i686/i686-w64-mingw32 \
+    --enable-sdk=all --enable-secure-api --build=i686-pc-linux-gnu --host=i686-w64-mingw32 && \
+make -j$(nproc) && \
+make install && \
+
+cd $HOME/mingw-build/mingw-w64-i686 && \
+ln -s i686-w64-mingw32 mingw
+
+
+Dependency: GMP
+===============
+
+cd ~/mingw-packages && \
+wget https://gmplib.org/download/gmp/gmp-6.1.2.tar.xz -O - | tar -xJvf - && \
+cd gmp-6.1.2 && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3 -fexceptions" \
+    ./configure --prefix=$HOME/mingw-packages/gmp-6.1.2-i686 --enable-fat \
+    --disable-shared --enable-static --enable-cxx --enable-silent-rules \
+    --build=i686-pc-linux-gnu && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: MPFR
+================
+
+cd ~/mingw-packages && \
+wget http://www.mpfr.org/mpfr-current/mpfr-4.0.1.tar.xz -O - | tar -xJvf - && \
+cd mpfr-4.0.1 && \
+wget http://www.mpfr.org/mpfr-4.0.1/allpatches && \
+patch -N -Z -p1 < allpatches && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-packages/mpfr-4.0.1-i686 --disable-shared \
+    --enable-static --with-gmp=$HOME/mingw-packages/gmp-6.1.2-i686 \
+    --enable-silent-rules --build=i686-pc-linux-gnu && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: MPC
+===============
+
+cd ~/mingw-packages && \
+wget https://ftp.gnu.org/gnu/mpc/mpc-1.1.0.tar.gz -O - | tar -xzvf - && \
+cd mpc-1.1.0 && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-packages/mpc-1.1.0-i686 --disable-shared \
+    --enable-static --with-gmp=$HOME/mingw-packages/gmp-6.1.2-i686 \
+    --with-mpfr=$HOME/mingw-packages/mpfr-4.0.1-i686 --enable-silent-rules \
+    --build=i686-pc-linux-gnu && \
+make -j$(nproc) && \
+make install
+
+
+Dependency: ISL
+===============
+
+cd ~/mingw-packages && \
+wget ftp://gcc.gnu.org/pub/gcc/infrastructure/isl-0.18.tar.bz2 -O - | tar -xjvf - && \
+cd isl-0.18 && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-packages/isl-0.18-i686 --enable-static \
+    --with-gmp-prefix=$HOME/mingw-packages/gmp-6.1.2-i686 \
+    --disable-shared --with-clang=no --build=i686-pc-linux-gnu && \
+make -j$(nproc) && \
+make install
+
+
+# Now that the dependencies have been built, we can build GCC and MinGW-w64.
+
+GNU Compiler Collection (GCC)
+=============================
+
+cd ~/mingw-packages && \
+wget ftp://ftp.gnu.org/gnu/gcc/gcc-8.1.0/gcc-8.1.0.tar.xz -O - | tar -xJvf - && \
+
+# GCC requires an out-of-tree build, so we create another staging area
+# specifically for GCC.
+
+mkdir gcc-build && \
+cd gcc-build && \
+
+# Now, the main build process.
+
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ../gcc-8.1.0/configure --prefix=$HOME/mingw-build/mingw-w64-i686 \
+    --disable-shared --enable-static --disable-nls --disable-multilib \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-i686 \
+    --with-mpc=$HOME/mingw-packages/mpc-1.1.0-i686 \
+    --with-mpfr=$HOME/mingw-packages/mpfr-4.0.1-i686 \
+    --with-gmp=$HOME/mingw-packages/gmp-6.1.2-i686 \
+    --with-isl=$HOME/mingw-packages/isl-0.18-i686 \
+    --with-host-libstdcxx=-lstdc++ --enable-languages=c,c++ \
+    --enable-threads=posix --enable-fully-dynamic-string \
+    --build=i686-pc-linux-gnu --target=i686-w64-mingw32 && \
+make -j$(nproc) all-gcc && \
+make install-gcc
+
+
+MinGW-w64 Runtime
+=================
+
+cd ~/mingw-packages/mingw-w64/mingw-w64-crt && \
+export PATH=$PATH:$HOME/mingw-build/mingw-w64-i686/bin && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-i686/i686-w64-mingw32 \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-i686/i686-w64-mingw32 \
+    --build=i686-pc-linux-gnu --host=i686-w64-mingw32 --enable-silent-rules && \
+make -j$(nproc) && \
+make install && \
+
+# Enabling threads=posix in GCC requires building MinGW's winpthreads library
+
+cd ~/mingw-packages/mingw-w64/mingw-w64-libraries/winpthreads && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-i686/i686-w64-mingw32 \
+    --with-sysroot=$HOME/mingw-build/mingw-w64-i686/i686-w64-mingw32 \
+    --disable-shared --build=i686-pc-linux-gnu --host=i686-w64-mingw32 \
+    --enable-silent-rules && \
+make -j$(nproc) && \
+make install
+
+
+LibGCC
+======
+
+cd ~/mingw-packages/gcc-build && \
+make -j$(nproc) all-target-libgcc && \
+make install-target-libgcc && \
+make -j$(nproc) && \
+make install-strip
+
+
+Gendef
+======
+
+cd ~/mingw-packages/mingw-w64/mingw-w64-tools/gendef && \
+    CPPFLAGS="-mfpmath=sse -march=pentium3 -msse -mtune=pentium3" \
+    ./configure --prefix=$HOME/mingw-build/mingw-w64-i686 \
+    --build=i686-pc-linux-gnu && \
+make -j$(nproc) && \
+make install && \
+
+cd ~/mingw-build/mingw-w64-i686 && \
+rm mingw && \
+mv bin/gendef bin/i686-w64-mingw32-gendef
+
+
+Cleaning up
+===========
+
+# This is as simple as deleting the staging area.
+
+cd ~/ && \
+sudo rm -R mingw-packages
+
+
+
+Packaging Preparation
+=====================
+
+# Copy YASM and pkg-config into the bin directory of the toolchain so that they
+# can easily be found when a prefixed copy of these tools are needed.
+
+cd ~/mingw-build/mingw-w64-i686 && \
+sudo cp /usr/bin/yasm bin/i686-w64-mingw32-yasm && \
+sudo cp /usr/bin/yasm bin/i686-w64-mingw32-nasm && \
+sudo cp /usr/bin/pkg-config bin/i686-w64-mingw32-pkg-config
+
+# A few of these pieces require using CMake to build them. This is not as
+# straight-forward as using autotools to cross-compile, and requires some setup:
+
+cd i686-w64-mingw32 && \
+wget http://cpansearch.perl.org/src/TOKUHIROM/mRuby-0.06/vendor/mruby/cmake/Toolchain-Ubuntu-mingw32.cmake.sample -O toolchain-i686-w64-mingw32.cmake && \
+sed -i 's/ ~\/crossdev\/w32//g' toolchain-i686-w64-mingw32.cmake
+
+
+++++++++++++++++++++++++++++
++ Installing the toolchain
+++++++++++++++++++++++++++++
+
+cd ~/mingw-build/mingw-w64-i686 && \
+    sudo checkinstall --pkgname=mingw-w64-gcc \
+    --pkgversion="1:$(bin/i686-w64-mingw32-gcc --version | head -1 | \
+    cut -f3 -d ' ')" --backup=no --deldoc=yes --delspec=yes --deldesc=yes \
+    --strip=yes --stripso=yes --addso=yes --fstrans=no --default cp -R * /usr && \
+mv *.deb ~/
+
+
++++++++++++++++
++ Final notes
++++++++++++++++
+
+# Many commands have, after running make, an 'rm <filename>.spec' command.
+# These .spec files are intended for - from what I can tell - RPM distributions,
+# maybe sometimes DEB, and they provide the package information to be used as
+# metadata in the package. checkinstall has severe problems with this, as it
+# will try to automatically use the .spec file rather than the user-provided
+# metadata that gets passed to it normally. The end result is that - in the best
+# case - the resulting package gets the wrong metadata attached to it (and has
+# no -mingw identifying label).  At worst, the metadata is extremely malformatted,
+# and may even cause packaging errors.
+
+# So if a set of instructions has one of these spec-removal commands, ALWAYS
+# remember to run it.
+
+
+# The '&& \' at the end of each instruction is to allow running the
+# entire piece at once.  This is for convenience, and should just work.
+# If there are errors, run each instruction one at a time and adjust
+# accordingly.
+
+
+# Finally, we'll be keeping most of the source directories for the dependencies
+# in a subdirectory so that it doesn't clog your $HOME with a bunch of stuff
+# that only needs to be built occasionally.  The *.deb files that checkinstall
+# spits out will also be moved to their own directory for archival purposes.
+
+mkdir -p ~/mpv-build-deps ~/mingw_debs/i686
