@@ -147,8 +147,8 @@ void mp_update_logging(struct MPContext *mpctx, bool preinit)
 void mp_print_version(struct mp_log *log, int always)
 {
     int v = always ? MSGL_INFO : MSGL_V;
-    mp_msg(log, v, "%s %s %s\n",
-           mpv_version, mpv_copyright, mpv_builddate);
+    mp_msg(log, v, "%s %s %s\n last updated on %s\n",
+           mpv_version, mpv_copyright, mpv_builddate, mpv_gitdate);
 #if HAVE_LIBPLACEBO
     mp_msg(log, v, "libplacebo version: %s\n", PL_VERSION);
 #endif
